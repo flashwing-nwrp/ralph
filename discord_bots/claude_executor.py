@@ -126,8 +126,13 @@ class ClaudeExecutor:
             cmd = [
                 self.claude_cmd,
                 "-p", full_prompt,
-                "--yes",  # Auto-accept for automation
+                "--yes",  # Auto-accept prompts
             ]
+
+            # Add permission skip flag if configured (for autonomous operation)
+            skip_permissions = os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
+            if skip_permissions:
+                cmd.append("--dangerously-skip-permissions")
 
             # Execute Claude Code
             process = await asyncio.create_subprocess_exec(
