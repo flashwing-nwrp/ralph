@@ -25,6 +25,7 @@ load_dotenv()
 # Import execution engine
 from claude_executor import ClaudeExecutor, TaskResult, TaskStatus, AgentCoordinator
 from agent_prompts import AGENT_ROLES, HANDOFF_RULES
+from vps_deployer import get_deployer, DeploymentStatus
 
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
@@ -130,6 +131,10 @@ class BaseAgentBot(ABC):
             raise ValueError("Missing DISCORD_GUILD_ID in environment")
         self.guild_id = int(self.guild_id)
 
+        # Load owner ID (optional but recommended)
+        owner_id = os.getenv("OWNER_USER_ID")
+        self.owner_id = int(owner_id) if owner_id else None
+
         # Setup logging
         self.logger = setup_logging(agent_name)
 
@@ -158,6 +163,7 @@ class BaseAgentBot(ABC):
         self._register_events()
         self._register_commands()
         self._register_execution_commands()
+        self._register_user_commands()
 
     @classmethod
     def set_executor(cls, executor: ClaudeExecutor):
@@ -222,8 +228,77 @@ class BaseAgentBot(ABC):
             # Process commands first
             await self.bot.process_commands(message)
 
+            # Check if owner is @mentioning this agent
+            if self.bot.user.mentioned_in(message):
+                await self._handle_mention(message)
+
             # Then handle agent-specific message processing
             await self.on_agent_message(message)
+
+    def _is_owner(self, user_id: int) -> bool:
+        """Check if user is the owner/operator."""
+        return self.owner_id is not None and user_id == self.owner_id
+
+    async def _handle_mention(self, message: discord.Message):
+        """Handle when this agent is @mentioned."""
+        # Remove the bot mention from the message to get the actual content
+        content = message.content
+        for mention in message.mentions:
+            if mention == self.bot.user:
+                content = content.replace(f"<@{mention.id}>", "").replace(f"<@!{mention.id}>", "")
+        content = content.strip()
+
+        if not content:
+            # Just a mention with no content
+            await message.reply(
+                f"You called? I'm the **{self.agent_name}**. "
+                f"Ask me something or give me a task with `!do <task>`"
+            )
+            return
+
+        # Check if this is from the owner - give priority
+        is_owner = self._is_owner(message.author.id)
+
+        if is_owner:
+            self.logger.info(f"Owner directive: {content[:100]}")
+
+            # If it looks like a question, answer it
+            if "?" in content:
+                await self._respond_to_question(message, content)
+            # If it looks like a directive, execute it
+            elif any(word in content.lower() for word in ["stop", "pause", "cancel", "wait"]):
+                await message.reply(f"Understood. **{self.agent_name}** standing by.")
+            elif any(word in content.lower() for word in ["resume", "continue", "proceed", "go"]):
+                await message.reply(f"**{self.agent_name}** resuming operations.")
+            else:
+                # Treat as a task directive
+                await message.reply(f"On it! Executing: {content[:100]}...")
+                result = await self.execute_task(content)
+                await self._post_task_result(message.channel, result)
+        else:
+            # Non-owner mention - still respond but don't auto-execute
+            await message.reply(
+                f"I heard you! For task execution, use `!do <task>` or ask the operator."
+            )
+
+    async def _respond_to_question(self, message: discord.Message, question: str):
+        """Respond to a question using Claude Code."""
+        if not self._executor:
+            await message.reply("Executor not available. Please try again later.")
+            return
+
+        # Frame as a question-answering task
+        task = f"Answer this question based on your expertise as {self.agent_name}: {question}"
+
+        await message.reply(f"Let me think about that...")
+        result = await self.execute_task(task, notify_channel=False)
+
+        if result.status == TaskStatus.COMPLETED:
+            # Truncate for Discord
+            response = result.output[:1900] if len(result.output) > 1900 else result.output
+            await message.reply(response)
+        else:
+            await message.reply(f"I had trouble with that: {result.error or 'Unknown error'}")
 
     def _register_commands(self):
         """Register common bot commands."""
@@ -381,6 +456,196 @@ class BaseAgentBot(ABC):
             embed.add_field(name="Recent Completed", value=completed_text, inline=False)
 
             await ctx.reply(embed=embed)
+
+    def _register_user_commands(self):
+        """Register commands for user/operator interaction."""
+
+        @self.bot.command(name="ask")
+        async def ask(ctx: commands.Context, *, question: str = None):
+            """Ask this agent a question."""
+            if not question:
+                await ctx.reply(
+                    f"Usage: `!ask <question>`\n"
+                    f"Example: `!ask What parameters should I tune for momentum strategies?`"
+                )
+                return
+
+            await self._respond_to_question(ctx.message, question)
+
+        @self.bot.command(name="stop")
+        async def stop_agent(ctx: commands.Context):
+            """Tell this agent to pause (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can stop agents.")
+                return
+
+            await ctx.reply(f"**{self.agent_name}** pausing. Use `!resume` to continue.")
+            # Note: Full pause implementation would require task queue management
+
+        @self.bot.command(name="resume")
+        async def resume_agent(ctx: commands.Context):
+            """Tell this agent to resume (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can resume agents.")
+                return
+
+            await ctx.reply(f"**{self.agent_name}** resuming operations.")
+
+        @self.bot.command(name="redirect")
+        async def redirect(ctx: commands.Context, target_agent: str = None, *, message: str = None):
+            """Send a message to another agent (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can redirect messages.")
+                return
+
+            if not target_agent or not message:
+                await ctx.reply(
+                    "Usage: `!redirect <agent> <message>`\n"
+                    "Example: `!redirect risk Please review the latest backtest`"
+                )
+                return
+
+            # Post to the target agent's channel
+            valid_channels = {
+                "tuning": "tuning",
+                "backtest": "backtesting",
+                "risk": "risk",
+                "strategy": "strategy",
+                "data": "data"
+            }
+
+            target = target_agent.lower()
+            if target not in valid_channels:
+                await ctx.reply(f"Unknown agent: `{target}`. Valid: {', '.join(valid_channels.keys())}")
+                return
+
+            # Post message as if from the operator
+            channel_name = valid_channels[target]
+            await self._post_to_channel(
+                channel_name,
+                f"**Operator message via {self.agent_name}:**\n{message}"
+            )
+            await ctx.reply(f"Message sent to #{channel_name}")
+
+        @self.bot.command(name="broadcast")
+        async def broadcast(ctx: commands.Context, *, message: str = None):
+            """Broadcast a message to all agents (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can broadcast.")
+                return
+
+            if not message:
+                await ctx.reply("Usage: `!broadcast <message>`")
+                return
+
+            await self.post_to_team_channel(f"**OPERATOR BROADCAST:**\n{message}")
+            await ctx.reply("Broadcast sent to #ralph-team")
+
+        # VPS Deployment Commands
+
+        @self.bot.command(name="deploy")
+        async def deploy(ctx: commands.Context):
+            """Deploy latest code to VPS (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can deploy.")
+                return
+
+            deployer = get_deployer()
+            if not deployer.config:
+                await ctx.reply("VPS not configured. Check .env file.")
+                return
+
+            await ctx.reply("Deploying to VPS... This may take a minute.")
+
+            status, message = await deployer.deploy()
+
+            if status == DeploymentStatus.SUCCESS:
+                embed = discord.Embed(
+                    title="Deployment Successful",
+                    description=message,
+                    color=discord.Color.green()
+                )
+            else:
+                embed = discord.Embed(
+                    title="Deployment Failed",
+                    description=message,
+                    color=discord.Color.red()
+                )
+
+            await ctx.reply(embed=embed)
+            await self.post_to_team_channel(
+                f"**{self.agent_name}** triggered deployment: {status.value}"
+            )
+
+        @self.bot.command(name="vps")
+        async def vps_status(ctx: commands.Context):
+            """Check VPS status."""
+            deployer = get_deployer()
+            if not deployer.config:
+                await ctx.reply("VPS not configured. Check .env file.")
+                return
+
+            await ctx.reply("Checking VPS status...")
+            status = await deployer.get_status()
+
+            embed = discord.Embed(
+                title="VPS Status",
+                color=discord.Color.green() if status["connection"] else discord.Color.red()
+            )
+            embed.add_field(name="Connection", value="OK" if status["connection"] else "FAILED", inline=True)
+            embed.add_field(name="Service", value=status["service"], inline=True)
+            embed.add_field(name="Uptime", value=status["uptime"], inline=True)
+
+            if status["last_log"]:
+                embed.add_field(
+                    name="Recent Log",
+                    value=f"```\n{status['last_log'][-500:]}\n```",
+                    inline=False
+                )
+
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="logs")
+        async def vps_logs(ctx: commands.Context, lines: int = 50):
+            """Get VPS logs (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can view logs.")
+                return
+
+            deployer = get_deployer()
+            if not deployer.config:
+                await ctx.reply("VPS not configured.")
+                return
+
+            logs = await deployer.get_logs(lines)
+
+            # Split into chunks for Discord
+            if len(logs) > 1900:
+                logs = logs[-1900:]
+
+            await ctx.reply(f"```\n{logs}\n```")
+
+        @self.bot.command(name="restart")
+        async def restart_vps(ctx: commands.Context):
+            """Restart VPS service (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can restart services.")
+                return
+
+            deployer = get_deployer()
+            if not deployer.config:
+                await ctx.reply("VPS not configured.")
+                return
+
+            success, message = await deployer.restart_service()
+
+            if success:
+                await ctx.reply(f"Service restarted successfully")
+                await self.post_to_team_channel(
+                    f"**{self.agent_name}** restarted VPS service"
+                )
+            else:
+                await ctx.reply(f"Restart failed: {message}")
 
     async def _post_task_result(self, channel, result: TaskResult):
         """Post task execution result to Discord."""
