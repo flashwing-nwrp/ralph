@@ -1250,6 +1250,59 @@ class BaseAgentBot(ABC):
                 f"**Task**: {failed_task.description[:150]}..."
             )
 
+        @self.bot.command(name="add_task")
+        async def add_task_to_mission(ctx: commands.Context, agent: str = None, *, description: str = None):
+            """
+            Add a new task to the current mission.
+
+            Usage: !add_task <agent> <task description>
+            Agents: tuning, backtest, risk, strategy, data
+            """
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can add tasks.")
+                return
+
+            if not agent or not description:
+                await ctx.reply(
+                    "**Usage:** `!add_task <agent> <task description>`\n"
+                    "**Agents:** `tuning`, `backtest`, `risk`, `strategy`, `data`\n"
+                    "**Example:** `!add_task data Add dashboard integration for mission progress`"
+                )
+                return
+
+            agent = agent.lower()
+            valid_agents = ["tuning", "backtest", "risk", "strategy", "data"]
+            if agent not in valid_agents:
+                await ctx.reply(f"Invalid agent. Choose from: {', '.join(valid_agents)}")
+                return
+
+            manager = get_mission_manager()
+            if not manager.current_mission:
+                await ctx.reply("No active mission. Start one with `!mission <objective>`")
+                return
+
+            # Add the task
+            task = await manager.add_task_to_mission(
+                description=description,
+                assigned_to=agent,
+                priority="medium"
+            )
+
+            if task:
+                await ctx.reply(f"Added task `{task.task_id}` to {agent.title()} Agent")
+                await self.post_to_team_channel(
+                    f"➕ **Task Added** | `{task.task_id}`\n"
+                    f"**Agent:** {agent.title()}\n"
+                    f"**Task:** {description[:200]}{'...' if len(description) > 200 else ''}\n"
+                    f"*Added by {ctx.author.mention}*"
+                )
+            else:
+                await ctx.reply("Failed to add task. Check logs for details.")
+
         @self.bot.command(name="learnings")
         async def show_learnings(ctx: commands.Context, *, query: str = None):
             """
