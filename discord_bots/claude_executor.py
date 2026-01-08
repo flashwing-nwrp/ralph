@@ -74,11 +74,19 @@ class ClaudeExecutor:
     - Progress file updates (Ralph pattern)
     """
 
+    # Keywords that indicate compute-heavy tasks needing longer timeouts
+    LONG_RUNNING_KEYWORDS = [
+        "backtest", "walk-forward", "validation", "train", "optimize",
+        "sweep", "grid search", "bayesian", "cross-validation",
+        "full analysis", "comprehensive", "all markets", "all symbols"
+    ]
+
     def __init__(
         self,
         project_dir: str = None,
         claude_cmd: str = None,
         timeout: int = 300,  # 5 minutes default
+        long_timeout: int = 1800,  # 30 minutes for compute-heavy tasks (backtests can span years)
         progress_file: str = "agent_progress.txt"
     ):
         self.project_dir = Path(project_dir or os.getenv("RALPH_PROJECT_DIR", "."))
@@ -86,11 +94,21 @@ class ClaudeExecutor:
         raw_claude_cmd = claude_cmd or os.getenv("CLAUDE_CMD", "claude")
         self.claude_cmd = str(Path(raw_claude_cmd)) if raw_claude_cmd else "claude"
         self.timeout = timeout
+        self.long_timeout = long_timeout
         self.progress_file = self.project_dir / progress_file
 
         # Task tracking
         self.task_counter = 0
         self.running_tasks: dict[str, asyncio.Task] = {}
+
+    def _get_task_timeout(self, task_prompt: str) -> int:
+        """Determine appropriate timeout based on task content."""
+        task_lower = task_prompt.lower()
+        for keyword in self.LONG_RUNNING_KEYWORDS:
+            if keyword in task_lower:
+                logger.info(f"Detected long-running task (keyword: {keyword}), using extended timeout")
+                return self.long_timeout
+        return self.timeout
 
     def _generate_task_id(self, agent_name: str) -> str:
         """Generate unique task ID."""
@@ -187,7 +205,8 @@ class ClaudeExecutor:
                 raise
 
             # Wait with timeout, sending prompt via stdin
-            effective_timeout = timeout or self.timeout
+            # Use intelligent timeout detection for long-running tasks
+            effective_timeout = timeout or self._get_task_timeout(task_prompt)
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(input=full_prompt.encode("utf-8")),
