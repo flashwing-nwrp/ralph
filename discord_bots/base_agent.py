@@ -30,6 +30,16 @@ from mission_manager import get_mission_manager, MissionStatus
 from improvement_proposals import get_proposal_manager, ProposalStatus
 from scrum_manager import get_scrum_manager, StoryStatus, SprintStatus
 
+# P0/P1/P2 Operational Systems
+from emergency_controls import get_emergency_system, TradingState, CircuitBreakerType
+from monitoring_alerts import get_monitoring_system, AlertSeverity, AlertCategory, MetricType
+from decision_logger import get_decision_logger, DecisionType, DecisionOutcome
+from model_lifecycle import get_model_registry, ModelStatus, ModelType
+from data_quality import get_data_quality_monitor, DataSource, QualityStatus
+from scheduler import get_scheduler, TaskFrequency, ScheduleConfig
+from testing_framework import get_testing_framework, TestType, TestStatus
+from context_persistence import get_context_store, ContextType, MemoryPriority
+
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
     """Configure logging for an agent with colored output and optional file logging."""
@@ -170,6 +180,7 @@ class BaseAgentBot(ABC):
         self._register_mission_commands()
         self._register_proposal_commands()
         self._register_scrum_commands()
+        self._register_operational_commands()
 
     @classmethod
     def set_executor(cls, executor: ClaudeExecutor):
@@ -1410,6 +1421,488 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             scrum = get_scrum_manager()
             report = scrum.get_velocity_report()
             await ctx.reply(report)
+
+    def _register_operational_commands(self):
+        """Register P0/P1/P2 operational system commands."""
+
+        # =====================================================================
+        # EMERGENCY CONTROLS (P0)
+        # =====================================================================
+
+        @self.bot.command(name="killswitch")
+        async def killswitch(ctx: commands.Context, *, reason: str = "Manual kill switch activation"):
+            """Activate emergency kill switch - halts ALL trading (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can activate the kill switch.")
+                return
+
+            emergency = get_emergency_system()
+            event = await emergency.activate_kill_switch(reason, triggered_by=str(ctx.author))
+
+            embed = discord.Embed(
+                title="KILL SWITCH ACTIVATED",
+                description=f"All trading has been HALTED.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Event ID", value=event.event_id, inline=True)
+            embed.add_field(name="Triggered By", value=str(ctx.author), inline=True)
+            embed.set_footer(text="Use !resume_trading to resume after review")
+
+            await ctx.reply(embed=embed)
+            await self.post_to_team_channel(
+                f"**KILL SWITCH ACTIVATED** by {ctx.author.mention}\n"
+                f"Reason: {reason}\n"
+                f"**ALL TRADING HALTED**"
+            )
+
+        @self.bot.command(name="halt")
+        async def halt_trading(ctx: commands.Context, *, reason: str = "Manual halt"):
+            """Halt trading (less severe than kill switch) (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can halt trading.")
+                return
+
+            emergency = get_emergency_system()
+            await emergency.halt_trading(reason, triggered_by=str(ctx.author))
+            await ctx.reply(f"Trading halted: {reason}\nUse `!resume_trading` to resume.")
+
+        @self.bot.command(name="resume_trading")
+        async def resume_trading(ctx: commands.Context, *, notes: str = ""):
+            """Resume trading after halt/kill switch (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can resume trading.")
+                return
+
+            emergency = get_emergency_system()
+            event = await emergency.resume_trading(str(ctx.author), notes)
+
+            if event:
+                await ctx.reply(f"Trading RESUMED.\nNotes: {notes or 'None'}")
+                await self.post_to_team_channel(f"**Trading Resumed** by {ctx.author.mention}")
+            else:
+                await ctx.reply("Trading was already active.")
+
+        @self.bot.command(name="trading_status")
+        async def trading_status(ctx: commands.Context):
+            """Check trading system status."""
+            emergency = get_emergency_system()
+            status_display = emergency.get_status_display()
+            await ctx.reply(status_display)
+
+        @self.bot.command(name="circuit_breakers")
+        async def circuit_breakers(ctx: commands.Context):
+            """Show circuit breaker configurations."""
+            emergency = get_emergency_system()
+            output = ["**Circuit Breaker Configuration:**\n"]
+            for cb_type, config in emergency.circuit_breakers.items():
+                output.append(
+                    f"• **{cb_type.value}**: threshold={config.threshold}, "
+                    f"cooldown={config.cooldown_minutes}m, auto_reset={config.auto_reset}"
+                )
+            await ctx.reply("\n".join(output))
+
+        # =====================================================================
+        # MONITORING & ALERTS (P0)
+        # =====================================================================
+
+        @self.bot.command(name="dashboard")
+        async def dashboard(ctx: commands.Context):
+            """Show the monitoring dashboard."""
+            monitoring = get_monitoring_system()
+            dashboard_view = monitoring.get_dashboard()
+            await ctx.reply(dashboard_view)
+
+        @self.bot.command(name="alerts")
+        async def alerts(ctx: commands.Context, limit: int = 10):
+            """Show active alerts."""
+            monitoring = get_monitoring_system()
+            alerts_view = monitoring.get_alerts_display(limit)
+            await ctx.reply(alerts_view)
+
+        @self.bot.command(name="ack")
+        async def acknowledge_alert(ctx: commands.Context, alert_id: str = None):
+            """Acknowledge an alert."""
+            if not alert_id:
+                await ctx.reply("Usage: `!ack <alert_id>`")
+                return
+
+            monitoring = get_monitoring_system()
+            alert = await monitoring.acknowledge_alert(alert_id.upper(), str(ctx.author))
+
+            if alert:
+                await ctx.reply(f"Alert `{alert_id}` acknowledged.")
+            else:
+                await ctx.reply(f"Alert `{alert_id}` not found.")
+
+        @self.bot.command(name="resolve")
+        async def resolve_alert(ctx: commands.Context, alert_id: str = None, *, notes: str = ""):
+            """Resolve an alert."""
+            if not alert_id:
+                await ctx.reply("Usage: `!resolve <alert_id> [notes]`")
+                return
+
+            monitoring = get_monitoring_system()
+            alert = await monitoring.resolve_alert(alert_id.upper(), notes)
+
+            if alert:
+                await ctx.reply(f"Alert `{alert_id}` resolved.")
+            else:
+                await ctx.reply(f"Alert `{alert_id}` not found.")
+
+        # =====================================================================
+        # DECISION LOGGER (P0/P1)
+        # =====================================================================
+
+        @self.bot.command(name="decisions")
+        async def decisions(ctx: commands.Context, limit: int = 10):
+            """Show recent decision log."""
+            logger = get_decision_logger()
+            log_view = logger.get_decision_log_display(limit)
+            await ctx.reply(log_view)
+
+        @self.bot.command(name="decision")
+        async def decision_detail(ctx: commands.Context, decision_id: str = None):
+            """Show decision details."""
+            if not decision_id:
+                await ctx.reply("Usage: `!decision <decision_id>`")
+                return
+
+            logger = get_decision_logger()
+            details = logger.get_decision_details(decision_id.upper())
+            await ctx.reply(details)
+
+        @self.bot.command(name="trading_summary")
+        async def trading_summary(ctx: commands.Context, days: int = 1):
+            """Show trading decision summary."""
+            logger = get_decision_logger()
+            summary = logger.get_trading_summary(days)
+            await ctx.reply(summary)
+
+        # =====================================================================
+        # MODEL LIFECYCLE (P1)
+        # =====================================================================
+
+        @self.bot.command(name="models")
+        async def models(ctx: commands.Context):
+            """Show model registry."""
+            registry = get_model_registry()
+            view = registry.get_registry_display()
+            await ctx.reply(view)
+
+        @self.bot.command(name="model")
+        async def model_detail(ctx: commands.Context, model_id: str = None, version: str = None):
+            """Show model details."""
+            if not model_id:
+                await ctx.reply("Usage: `!model <model_id> [version]`")
+                return
+
+            registry = get_model_registry()
+            details = registry.get_model_details(model_id, version)
+            await ctx.reply(details)
+
+        @self.bot.command(name="training")
+        async def training_history(ctx: commands.Context, model_id: str = None):
+            """Show training run history."""
+            registry = get_model_registry()
+            history = registry.get_training_history(model_id)
+            await ctx.reply(history)
+
+        @self.bot.command(name="deploy_model")
+        async def deploy_model(ctx: commands.Context, model_id: str = None, version: str = None, *, notes: str = ""):
+            """Deploy a model to production (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can deploy models.")
+                return
+
+            if not model_id or not version:
+                await ctx.reply("Usage: `!deploy_model <model_id> <version> [notes]`")
+                return
+
+            registry = get_model_registry()
+            model = await registry.deploy_model(model_id, version, str(ctx.author), notes)
+
+            if model:
+                await ctx.reply(f"Model `{model_id}` v{version} deployed.")
+                await self.post_to_team_channel(
+                    f"**Model Deployed:** {model_id} v{version} by {ctx.author.mention}"
+                )
+            else:
+                await ctx.reply(f"Model `{model_id}` v{version} not found.")
+
+        @self.bot.command(name="rollback_model")
+        async def rollback_model(ctx: commands.Context, model_id: str = None, to_version: str = None, *, reason: str = ""):
+            """Rollback to a previous model version (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can rollback models.")
+                return
+
+            if not model_id or not to_version:
+                await ctx.reply("Usage: `!rollback_model <model_id> <to_version> [reason]`")
+                return
+
+            registry = get_model_registry()
+            model = await registry.rollback_model(model_id, to_version, reason)
+
+            if model:
+                await ctx.reply(f"Model `{model_id}` rolled back to v{to_version}.")
+                await self.post_to_team_channel(
+                    f"**Model Rollback:** {model_id} -> v{to_version}\nReason: {reason}"
+                )
+            else:
+                await ctx.reply(f"Rollback failed. Check model ID and version.")
+
+        # =====================================================================
+        # DATA QUALITY (P1)
+        # =====================================================================
+
+        @self.bot.command(name="data_quality")
+        async def data_quality(ctx: commands.Context):
+            """Show data quality dashboard."""
+            monitor = get_data_quality_monitor()
+            dashboard_view = monitor.get_dashboard()
+            await ctx.reply(dashboard_view)
+
+        @self.bot.command(name="data_source")
+        async def data_source(ctx: commands.Context, source: str = None):
+            """Show data quality for a specific source."""
+            if not source:
+                await ctx.reply(
+                    "Usage: `!data_source <source>`\n"
+                    "Sources: polymarket_api, coinbase_ws, binance_ws, mysql_candles, taapi_indicators"
+                )
+                return
+
+            try:
+                source_enum = DataSource(source.lower())
+            except ValueError:
+                await ctx.reply(f"Invalid source: {source}")
+                return
+
+            monitor = get_data_quality_monitor()
+            details = monitor.get_source_details(source_enum)
+            await ctx.reply(details)
+
+        @self.bot.command(name="quality_history")
+        async def quality_history(ctx: commands.Context, source: str = None, limit: int = 20):
+            """Show data quality check history."""
+            source_enum = None
+            if source:
+                try:
+                    source_enum = DataSource(source.lower())
+                except ValueError:
+                    await ctx.reply(f"Invalid source: {source}")
+                    return
+
+            monitor = get_data_quality_monitor()
+            history = monitor.get_quality_history(source_enum, limit)
+            await ctx.reply(history)
+
+        # =====================================================================
+        # SCHEDULER (P2)
+        # =====================================================================
+
+        @self.bot.command(name="schedule")
+        async def schedule(ctx: commands.Context):
+            """Show scheduled tasks."""
+            scheduler = get_scheduler()
+            view = scheduler.get_schedule_display()
+            await ctx.reply(view)
+
+        @self.bot.command(name="task_detail")
+        async def task_detail(ctx: commands.Context, task_id: str = None):
+            """Show scheduled task details."""
+            if not task_id:
+                await ctx.reply("Usage: `!task_detail <task_id>`")
+                return
+
+            scheduler = get_scheduler()
+            details = scheduler.get_task_details(task_id.upper())
+            await ctx.reply(details)
+
+        @self.bot.command(name="run_task")
+        async def run_task(ctx: commands.Context, task_id: str = None):
+            """Run a scheduled task now (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can run tasks manually.")
+                return
+
+            if not task_id:
+                await ctx.reply("Usage: `!run_task <task_id>`")
+                return
+
+            scheduler = get_scheduler()
+            await ctx.reply(f"Running task `{task_id}`...")
+
+            execution = await scheduler.run_task(task_id.upper(), force=True)
+
+            if execution:
+                await ctx.reply(f"Task `{task_id}` {execution.status}: {execution.result or execution.error_message}")
+            else:
+                await ctx.reply(f"Task `{task_id}` not found or no handler registered.")
+
+        @self.bot.command(name="pause_task")
+        async def pause_task(ctx: commands.Context, task_id: str = None):
+            """Pause a scheduled task (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can pause tasks.")
+                return
+
+            if not task_id:
+                await ctx.reply("Usage: `!pause_task <task_id>`")
+                return
+
+            scheduler = get_scheduler()
+            task = await scheduler.pause_task(task_id.upper())
+
+            if task:
+                await ctx.reply(f"Task `{task_id}` paused.")
+            else:
+                await ctx.reply(f"Task `{task_id}` not found.")
+
+        @self.bot.command(name="resume_task")
+        async def resume_task(ctx: commands.Context, task_id: str = None):
+            """Resume a paused task (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can resume tasks.")
+                return
+
+            if not task_id:
+                await ctx.reply("Usage: `!resume_task <task_id>`")
+                return
+
+            scheduler = get_scheduler()
+            task = await scheduler.resume_task(task_id.upper())
+
+            if task:
+                await ctx.reply(f"Task `{task_id}` resumed.")
+            else:
+                await ctx.reply(f"Task `{task_id}` not found.")
+
+        # =====================================================================
+        # TESTING (P2)
+        # =====================================================================
+
+        @self.bot.command(name="tests")
+        async def tests(ctx: commands.Context):
+            """Show test summary."""
+            framework = get_testing_framework()
+            summary = framework.get_test_summary()
+            await ctx.reply(summary)
+
+        @self.bot.command(name="test")
+        async def test_detail(ctx: commands.Context, test_id: str = None):
+            """Show test details."""
+            if not test_id:
+                await ctx.reply("Usage: `!test <test_id>`")
+                return
+
+            framework = get_testing_framework()
+            details = framework.get_test_details(test_id.upper())
+            await ctx.reply(details)
+
+        @self.bot.command(name="run_test")
+        async def run_test(ctx: commands.Context, test_id: str = None):
+            """Run a specific test."""
+            if not test_id:
+                await ctx.reply("Usage: `!run_test <test_id>`")
+                return
+
+            framework = get_testing_framework()
+            await ctx.reply(f"Running test `{test_id}`...")
+
+            try:
+                result = await framework.run_test(test_id.upper())
+                status_emoji = "Pass" if result.status == TestStatus.PASSED else "Fail"
+                await ctx.reply(f"Test `{test_id}`: {status_emoji}\n{result.result_message}")
+            except ValueError as e:
+                await ctx.reply(str(e))
+
+        @self.bot.command(name="run_tests")
+        async def run_all_tests(ctx: commands.Context, test_type: str = None):
+            """Run all tests or tests of a specific type."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can run all tests.")
+                return
+
+            framework = get_testing_framework()
+            await ctx.reply("Running tests...")
+
+            if test_type:
+                try:
+                    type_enum = TestType(test_type.lower())
+                    run = await framework.run_by_type(type_enum)
+                except ValueError:
+                    await ctx.reply(f"Invalid test type: {test_type}")
+                    return
+            else:
+                run = await framework.run_all()
+
+            results = framework.get_run_results(run.run_id)
+            await ctx.reply(results)
+
+        @self.bot.command(name="test_results")
+        async def test_results(ctx: commands.Context, run_id: str = None):
+            """Show test run results."""
+            framework = get_testing_framework()
+            results = framework.get_run_results(run_id.upper() if run_id else None)
+            await ctx.reply(results)
+
+        # =====================================================================
+        # CONTEXT/MEMORY (P2)
+        # =====================================================================
+
+        @self.bot.command(name="context")
+        async def context(ctx: commands.Context):
+            """Show context store summary."""
+            store = get_context_store()
+            summary = store.get_context_summary()
+            await ctx.reply(summary)
+
+        @self.bot.command(name="agent_memory")
+        async def agent_memory(ctx: commands.Context, agent: str = None):
+            """Show memory summary for an agent."""
+            if not agent:
+                agent = self.agent_type
+
+            store = get_context_store()
+            summary = store.get_agent_memory_summary(agent)
+            await ctx.reply(summary)
+
+        @self.bot.command(name="share_context")
+        async def share_context(ctx: commands.Context, key: str = None, *, value: str = None):
+            """Share context with other agents."""
+            if not key or not value:
+                await ctx.reply("Usage: `!share_context <key> <value>`")
+                return
+
+            store = get_context_store()
+            await store.share_context(
+                from_agent=self.agent_type,
+                key=key,
+                value=value,
+                summary=f"Shared by {self.agent_name}"
+            )
+            await ctx.reply(f"Context `{key}` shared with all agents.")
+
+        @self.bot.command(name="sessions")
+        async def sessions(ctx: commands.Context):
+            """Show active agent sessions."""
+            store = get_context_store()
+            active = [s for s in store.sessions.values() if s.status == "active"]
+
+            if not active:
+                await ctx.reply("No active sessions.")
+                return
+
+            output = ["**Active Sessions:**"]
+            for session in active:
+                output.append(
+                    f"• `{session.session_id}` | {session.agent}\n"
+                    f"  Task: {session.current_task or 'None'}\n"
+                    f"  Actions: {session.actions_taken}"
+                )
+            await ctx.reply("\n".join(output))
 
     async def _post_task_result(self, channel, result: TaskResult):
         """Post task execution result to Discord."""
