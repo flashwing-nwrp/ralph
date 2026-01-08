@@ -372,21 +372,38 @@ class MissionManager:
 
     def get_mission_summary(self) -> str:
         """Get a formatted summary of the current mission."""
+        chunks = self.get_mission_summary_chunks()
+        return "\n".join(chunks)
+
+    def get_mission_summary_chunks(self, max_chunk_size: int = 1800) -> list:
+        """
+        Get mission summary as a list of chunks for Discord's message limit.
+
+        Args:
+            max_chunk_size: Max characters per chunk (Discord limit is 2000)
+
+        Returns:
+            List of message strings
+        """
         if not self.current_mission:
-            return "No active mission. Use `!mission <objective>` to set one."
+            return ["No active mission. Use `!mission <objective>` to set one."]
 
         m = self.current_mission
         progress = m.get_progress()
 
-        summary = [
-            f"**Mission {m.mission_id}**: {m.objective}",
+        # Header chunk
+        header = [
+            f"**Mission {m.mission_id}**: {m.objective[:200]}",
             f"**Status**: {m.status.value}",
             f"**Progress**: {progress['completed']}/{progress['total']} tasks ({progress['percent']}%)",
-            ""
         ]
 
+        chunks = ["\n".join(header)]
+
         if m.tasks:
-            summary.append("**Tasks:**")
+            current_chunk = ["", "**Tasks:**"]
+            current_size = sum(len(s) for s in current_chunk)
+
             for task in m.tasks:
                 status_icon = {
                     "pending": "⏳",
@@ -395,11 +412,23 @@ class MissionManager:
                     "failed": "❌"
                 }.get(task.status, "❓")
 
-                summary.append(
-                    f"  {status_icon} `{task.task_id}` [{task.assigned_to}] {task.description[:60]}"
-                )
+                task_line = f"  {status_icon} `{task.task_id}` [{task.assigned_to}] {task.description[:80]}"
 
-        return "\n".join(summary)
+                # Check if adding this line would exceed the chunk size
+                if current_size + len(task_line) + 1 > max_chunk_size:
+                    # Save current chunk and start new one
+                    chunks.append("\n".join(current_chunk))
+                    current_chunk = [task_line]
+                    current_size = len(task_line)
+                else:
+                    current_chunk.append(task_line)
+                    current_size += len(task_line) + 1
+
+            # Add remaining tasks
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+
+        return chunks
 
     async def pause_mission(self):
         """Pause the current mission."""

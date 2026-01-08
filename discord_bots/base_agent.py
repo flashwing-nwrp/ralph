@@ -1246,8 +1246,14 @@ Only output the structured commands, no other text."""
         async def mission_status(ctx: commands.Context):
             """Check the current mission status."""
             manager = get_mission_manager()
-            summary = manager.get_mission_summary()
-            await ctx.reply(summary)
+            chunks = manager.get_mission_summary_chunks()
+
+            # Send first chunk as reply, rest as follow-up messages
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    await ctx.reply(chunk)
+                else:
+                    await ctx.send(chunk)
 
         @self.bot.command(name="pause_mission")
         async def pause_mission(ctx: commands.Context):
