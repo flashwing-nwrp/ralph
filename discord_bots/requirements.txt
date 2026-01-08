@@ -1,0 +1,13 @@
+# RALPH Discord Agent Bots - Dependencies
+
+# Discord API wrapper
+discord.py>=2.3.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Async utilities
+aiohttp>=3.9.0
+
+# Logging enhancement (optional but recommended)
+colorlog>=6.8.0
