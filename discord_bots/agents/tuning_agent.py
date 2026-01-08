@@ -26,6 +26,7 @@ class TuningAgent(BaseAgentBot):
             agent_name="Tuning Agent",
             token_env_var="TUNING_AGENT_TOKEN",
             primary_channel_name="tuning",
+            agent_type="tuning",
             description="Parameter optimization agent - handles hyperparameter tuning, learning rate scheduling, and model configuration."
         )
 

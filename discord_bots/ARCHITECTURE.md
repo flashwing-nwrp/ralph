@@ -1,5 +1,54 @@
 # Discord Bot Architecture for RALPH Agent Ensemble
 
+## Overview: Autonomous Multi-Agent System
+
+This system combines the **Ralph pattern** (autonomous AI agent loop) with **Discord-based coordination**. Each agent:
+
+1. Has a **focused persona** (narrow context = accurate execution)
+2. Uses **Claude Code CLI** to perform actual work on the codebase
+3. Can **hand off tasks** to other agents automatically
+4. **Communicates via Discord** for transparency and coordination
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    AUTONOMOUS WORKFLOW                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   User: "!do Implement a new momentum strategy"                 │
+│                        │                                        │
+│                        ▼                                        │
+│   ┌─────────────┐  handoff   ┌─────────────┐                   │
+│   │  Strategy   │ ────────► │    Data     │                    │
+│   │   Agent     │            │   Agent     │                    │
+│   └─────────────┘            └──────┬──────┘                    │
+│         │                           │                           │
+│         │                           │ features ready            │
+│         │                           ▼                           │
+│         │                    ┌─────────────┐                   │
+│         │                    │  Backtest   │                    │
+│         │                    │   Agent     │                    │
+│         │                    └──────┬──────┘                    │
+│         │                           │                           │
+│         │                           │ results                   │
+│         │                           ▼                           │
+│         │                    ┌─────────────┐                   │
+│         │                    │    Risk     │ ◄── VETO POWER     │
+│         │                    │   Agent     │                    │
+│         │                    └──────┬──────┘                    │
+│         │                           │                           │
+│         │          ┌────────────────┼────────────────┐          │
+│         │          │ approved       │ rejected       │          │
+│         │          ▼                ▼                │          │
+│         │   ┌─────────────┐  ┌─────────────┐        │          │
+│         └──►│   Tuning    │  │  Strategy   │◄───────┘          │
+│             │   Agent     │  │ (fix issues)│                    │
+│             └─────────────┘  └─────────────┘                    │
+│                                                                 │
+│   Memory persists via: git commits, agent_progress.txt          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ## Recommendation: Multiple Bots (One Per Agent)
 
 ### Why Multiple Bots Over Single Bot?

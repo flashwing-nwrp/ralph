@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add RALPH Discord agent ensemble\n\nFive specialized Discord bots for AI trading collaboration:\n- Tuning Agent: parameter optimization\n- Backtest Agent: simulation & metrics\n- Risk Agent: safety auditing\n- Strategy Agent: logic & features\n- Data Agent: preprocessing & denoising\n\nIncludes:\n- Base agent class with reconnection/logging\n- Individual agent implementations with commands\n- Concurrent launcher \\(run_all.py\\)\n- Complete setup documentation\n- Communication patterns and examples\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git config:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(gh repo fork:*)",
+      "Bash(git remote set-url:*)"
+    ]
+  }
+}

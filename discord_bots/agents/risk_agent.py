@@ -27,6 +27,7 @@ class RiskAgent(BaseAgentBot):
             agent_name="Risk Agent",
             token_env_var="RISK_AGENT_TOKEN",
             primary_channel_name="risk",
+            agent_type="risk",
             description="Safety auditing agent - monitors risk exposure, validates position limits, enforces safety constraints."
         )
 

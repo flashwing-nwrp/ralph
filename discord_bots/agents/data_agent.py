@@ -27,6 +27,7 @@ class DataAgent(BaseAgentBot):
             agent_name="Data Agent",
             token_env_var="DATA_AGENT_TOKEN",
             primary_channel_name="data",
+            agent_type="data",
             description="Preprocessing and denoising agent - handles data ingestion, cleaning, normalization, and feature extraction."
         )
 

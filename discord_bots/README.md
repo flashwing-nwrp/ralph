@@ -1,6 +1,14 @@
 # RALPH Discord Agent Ensemble
 
-Discord bot system for the RALPH AI trading bot project. Five specialized agents communicate in a private Discord server to collaborate on bot development, tuning, backtesting, and risk management.
+**Autonomous multi-agent system** for AI trading bot development. Five specialized agents communicate via Discord and execute tasks using Claude Code CLI - they can work autonomously, handing off tasks to each other without user intervention.
+
+## Key Features
+
+- **Autonomous Execution**: Agents use Claude Code to perform real work on your codebase
+- **Automatic Handoffs**: Agents trigger each other based on workflow rules
+- **Focused Context**: Each agent has a narrow persona for accurate execution
+- **Discord Transparency**: All communication visible in Discord channels
+- **Ralph Pattern**: Memory persists via git history and progress files
 
 ## Agents
 
@@ -8,7 +16,7 @@ Discord bot system for the RALPH AI trading bot project. Five specialized agents
 |-------|------|-----------------|
 | **Tuning Agent** | Parameter optimization, hyperparameter tuning | `#tuning` |
 | **Backtest Agent** | Historical simulation, performance metrics | `#backtesting` |
-| **Risk Agent** | Safety auditing, risk limits enforcement | `#risk` |
+| **Risk Agent** | Safety auditing, risk limits enforcement (VETO power) | `#risk` |
 | **Strategy Agent** | Trading logic, feature engineering | `#strategy` |
 | **Data Agent** | Data preprocessing, cleaning, feature extraction | `#data` |
 
@@ -24,7 +32,16 @@ See [SETUP.md](SETUP.md) for exact names/descriptions to paste.
 
 ```bash
 cp .env.example .env
-# Edit .env with your 5 bot tokens + server ID
+```
+
+Edit `.env` with:
+- Your 5 bot tokens
+- Discord server ID
+- **Project directory** (where Claude Code will work)
+
+```env
+RALPH_PROJECT_DIR=E:\Polymarket AI Bot
+CLAUDE_CMD=claude
 ```
 
 ### 3. Install Dependencies
@@ -54,12 +71,45 @@ python run_single.py tuning
 
 ## Commands
 
-All agents respond to:
-- `!ping` - Check latency
-- `!status` - Agent status
-- `!help` - Available commands
+### Execution Commands (NEW)
+
+| Command | Description |
+|---------|-------------|
+| `!do <task>` | Execute a task using Claude Code |
+| `!handoff <agent> <task>` | Hand off task to another agent |
+| `!tasks` | Show running and completed tasks |
+
+### Common Commands
+
+| Command | Description |
+|---------|-------------|
+| `!ping` | Check latency |
+| `!status` | Agent status |
+| `!help` | Available commands |
 
 Agent-specific commands documented in [COMMUNICATION.md](COMMUNICATION.md).
+
+## Autonomous Workflow Example
+
+```
+User: !do Implement a momentum reversal strategy for Polymarket
+
+Strategy Agent → Designs strategy, requests features
+       ↓ (automatic handoff)
+Data Agent → Prepares price_momentum, volume features
+       ↓ (automatic handoff)
+Backtest Agent → Runs simulation, calculates Sharpe ratio
+       ↓ (automatic handoff)
+Risk Agent → Audits results, checks against limits
+       ↓ (if approved)
+Tuning Agent → Optimizes parameters
+       ↓ (automatic handoff)
+Backtest Agent → Validates optimized version
+       ↓
+Risk Agent → Final approval
+
+All visible in Discord. User intervention only if needed.
+```
 
 ## Security
 

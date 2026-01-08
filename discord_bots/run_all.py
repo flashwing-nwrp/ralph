@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-RALPH Discord Bot Launcher - Run All Agents
+RALPH Discord Bot Launcher - Run All Agents with Autonomous Orchestration
 
-This script starts all 5 RALPH agent bots concurrently using asyncio.
-Each bot runs in its own task with independent error handling.
+This script starts all 5 RALPH agent bots concurrently with Claude Code
+execution capabilities. Agents can trigger each other autonomously to
+complete complex workflows without user intervention.
 
 Usage:
     python run_all.py
@@ -21,6 +22,9 @@ from dotenv import load_dotenv
 # Load environment variables before importing agents
 load_dotenv()
 
+from claude_executor import ClaudeExecutor, AgentCoordinator
+from autonomous_orchestrator import AutonomousOrchestrator, set_orchestrator
+from base_agent import BaseAgentBot
 from agents import (
     TuningAgent,
     BacktestAgent,
@@ -39,29 +43,36 @@ logger = logging.getLogger("orchestrator")
 
 
 class BotOrchestrator:
-    """Manages multiple Discord bot instances concurrently."""
+    """Manages multiple Discord bot instances with Claude Code execution."""
 
     def __init__(self):
-        self.agents = []
+        self.agents: List[BaseAgentBot] = []
         self.tasks: List[asyncio.Task] = []
         self.shutdown_event = asyncio.Event()
+
+        # Initialize autonomous orchestrator
+        project_dir = os.getenv("RALPH_PROJECT_DIR", ".")
+        self.autonomous = AutonomousOrchestrator(project_dir=project_dir)
+        set_orchestrator(self.autonomous)
 
     def create_agents(self):
         """Instantiate all agent bots."""
         logger.info("Creating agent instances...")
 
         agent_classes = [
-            TuningAgent,
-            BacktestAgent,
-            RiskAgent,
-            StrategyAgent,
-            DataAgent,
+            ("tuning", TuningAgent),
+            ("backtest", BacktestAgent),
+            ("risk", RiskAgent),
+            ("strategy", StrategyAgent),
+            ("data", DataAgent),
         ]
 
-        for AgentClass in agent_classes:
+        for agent_type, AgentClass in agent_classes:
             try:
                 agent = AgentClass()
                 self.agents.append(agent)
+                # Register with orchestrator for autonomous dispatch
+                self.autonomous.register_agent(agent_type, agent)
                 logger.info(f"Created {agent.agent_name}")
             except ValueError as e:
                 logger.error(f"Failed to create {AgentClass.__name__}: {e}")
@@ -78,8 +89,11 @@ class BotOrchestrator:
             # Don't re-raise - let other agents continue
 
     async def run_all(self):
-        """Run all agents concurrently."""
-        logger.info("Starting all agents...")
+        """Run all agents concurrently with autonomous orchestration."""
+        logger.info("Starting all agents with autonomous orchestration...")
+
+        # Start the autonomous processor
+        await self.autonomous.start()
 
         # Create tasks for each agent
         self.tasks = [
@@ -94,8 +108,11 @@ class BotOrchestrator:
             logger.info("Tasks cancelled")
 
     async def shutdown(self):
-        """Gracefully shutdown all agents."""
+        """Gracefully shutdown all agents and orchestrator."""
         logger.info("Initiating graceful shutdown...")
+
+        # Stop autonomous processor
+        await self.autonomous.stop()
 
         # Shutdown each agent
         for agent in self.agents:
@@ -146,16 +163,25 @@ async def main():
 
 
 if __name__ == "__main__":
-    print("""
+    project_dir = os.getenv("RALPH_PROJECT_DIR", "E:\\Polymarket AI Bot")
+
+    print(f"""
 ╔═══════════════════════════════════════════════════════════════╗
-║           RALPH Discord Agent Ensemble                        ║
+║       RALPH Discord Agent Ensemble (Autonomous Mode)          ║
 ║                                                               ║
-║   Starting all 5 agents:                                      ║
+║   Starting all 5 agents with Claude Code execution:           ║
 ║   • Tuning Agent    - Parameter optimization                  ║
 ║   • Backtest Agent  - Simulation & metrics                    ║
 ║   • Risk Agent      - Safety auditing                         ║
 ║   • Strategy Agent  - Logic & features                        ║
 ║   • Data Agent      - Preprocessing & denoising               ║
+║                                                               ║
+║   Project Directory: {project_dir:<37} ║
+║                                                               ║
+║   New Commands:                                               ║
+║   • !do <task>           - Execute task with Claude Code      ║
+║   • !handoff <agent> <t> - Hand off task to another agent     ║
+║   • !tasks               - Show running/completed tasks       ║
 ║                                                               ║
 ║   Press Ctrl+C to shutdown gracefully                         ║
 ╚═══════════════════════════════════════════════════════════════╝

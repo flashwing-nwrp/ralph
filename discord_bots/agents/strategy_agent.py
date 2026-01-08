@@ -27,6 +27,7 @@ class StrategyAgent(BaseAgentBot):
             agent_name="Strategy Agent",
             token_env_var="STRATEGY_AGENT_TOKEN",
             primary_channel_name="strategy",
+            agent_type="strategy",
             description="Logic and features agent - designs trading strategies, implements signal generation, manages feature engineering."
         )
 

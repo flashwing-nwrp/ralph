@@ -28,6 +28,7 @@ class BacktestAgent(BaseAgentBot):
             agent_name="Backtest Agent",
             token_env_var="BACKTEST_AGENT_TOKEN",
             primary_channel_name="backtesting",
+            agent_type="backtest",
             description="Simulation and metrics agent - runs historical backtests, calculates performance metrics, validates strategies."
         )
 
