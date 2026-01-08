@@ -171,6 +171,63 @@ Agents can propose system improvements during their work, queued for operator re
 | `!logs [lines]` | Get VPS logs |
 | `!restart` | Restart VPS service |
 
+### Inter-Bot Communication
+| Command | Description |
+|---------|-------------|
+| `!team` | Show registered RALPH bots and status |
+| `!msg <agent> <message>` | Send a task to another agent |
+| `!ask_agent <agent> <question>` | Ask another agent a question |
+| `!alert_team [severity] <message>` | Alert all agents |
+| `!delegate <agent> <task>` | Hand off a task to another agent |
+| `!pending` | Show pending tasks from other agents |
+
+## Inter-Bot Communication
+
+RALPH agents communicate with each other using Discord @mentions. This enables autonomous collaboration where agents can:
+- Delegate tasks to specialists
+- Ask questions and get answers
+- Send alerts about issues
+- Hand off work when their part is complete
+
+### Message Format
+
+Agents use structured message prefixes to indicate intent:
+
+```
+@TargetAgent [ACTION] message content
+```
+
+**Actions:**
+- `[TASK]` - Request the target agent to do something
+- `[RESPONSE]` - Reply to a previous task
+- `[HANDOFF]` - Transfer work ownership
+- `[ALERT]` - Urgent notification
+- `[INFO]` - Informational message
+- `[QUESTION]` - Ask for input/decision
+- `[ACK]` - Acknowledgment
+
+### Example Workflow
+
+1. **Strategy Agent** plans a mission and delegates:
+   ```
+   @BacktestAgent [TASK] Run backtests on the new momentum parameters
+   ```
+
+2. **Backtest Agent** acknowledges and works:
+   ```
+   [ACK] Received task. Processing...
+   ```
+
+3. **Backtest Agent** completes and hands off to Risk:
+   ```
+   @RiskAgent [HANDOFF] Validate backtests results. Sharpe improved 15%.
+   ```
+
+4. **Risk Agent** reviews and alerts if issues:
+   ```
+   @StrategyAgent @TuningAgent [ALERT] Drawdown exceeds 15% limit
+   ```
+
 ## Architecture
 
 ```
@@ -297,6 +354,7 @@ ralph/
 │   ├── mission_manager.py     # Mission tracking
 │   ├── scrum_manager.py       # SCRUM methodology
 │   ├── improvement_proposals.py
+│   ├── bot_communication.py   # Inter-bot @mention communication
 │   │
 │   ├── # P0 Critical Systems
 │   ├── emergency_controls.py  # Kill switch, circuit breakers

@@ -40,6 +40,12 @@ from scheduler import get_scheduler, TaskFrequency, ScheduleConfig
 from testing_framework import get_testing_framework, TestType, TestStatus
 from context_persistence import get_context_store, ContextType, MemoryPriority
 
+# Inter-bot Communication
+from bot_communication import (
+    get_bot_registry, BotRegistry, BotCommunicator, MessageType,
+    InterBotMessage, MessageParser
+)
+
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
     """Configure logging for an agent with colored output and optional file logging."""
@@ -160,6 +166,10 @@ class BaseAgentBot(ABC):
         self.running_tasks: dict[str, str] = {}  # task_id -> description
         self.completed_tasks: list[dict] = []
 
+        # Inter-bot communication
+        self._bot_registry = get_bot_registry()
+        self._communicator: Optional[BotCommunicator] = None  # Initialized in on_ready
+
         # Discord client setup with minimal intents
         intents = discord.Intents.default()
         intents.message_content = True  # Required to read message content
@@ -181,6 +191,7 @@ class BaseAgentBot(ABC):
         self._register_proposal_commands()
         self._register_scrum_commands()
         self._register_operational_commands()
+        self._register_interbot_commands()
 
     @classmethod
     def set_executor(cls, executor: ClaudeExecutor):
@@ -201,6 +212,21 @@ class BaseAgentBot(ABC):
             self.reconnect_attempts = 0  # Reset on successful connection
             self.logger.info(f"Connected as {self.bot.user.name} ({self.bot.user.id})")
             self.logger.info(f"Serving guild: {self.guild_id}")
+
+            # Register with bot registry for inter-bot communication
+            await self._bot_registry.register_bot(
+                agent_type=self.agent_type,
+                agent_name=self.agent_name,
+                bot_user_id=self.bot.user.id,
+                bot_username=self.bot.user.name,
+                primary_channel=self.primary_channel_name
+            )
+
+            # Initialize the communicator now that we have the bot user
+            self._communicator = BotCommunicator(self._bot_registry, self.bot)
+            self._communicator.set_agent_info(self.agent_type, self.guild_id)
+
+            self.logger.info(f"Registered with bot registry: {self.agent_type} (ID: {self.bot.user.id})")
 
             # Post ready message to bot-logs channel
             await self._post_to_channel("bot-logs", f"**{self.agent_name}** is online and ready!")
@@ -244,6 +270,12 @@ class BaseAgentBot(ABC):
 
             # Process commands first
             await self.bot.process_commands(message)
+
+            # Check if this is a message from another RALPH bot mentioning us
+            if self._bot_registry.is_ralph_bot(message.author.id):
+                if self.bot.user.mentioned_in(message):
+                    await self._handle_interbot_message(message)
+                    return  # Don't process as regular mention
 
             # Check if owner is @mentioning this agent
             if self.bot.user.mentioned_in(message):
@@ -316,6 +348,128 @@ class BaseAgentBot(ABC):
             await message.reply(response)
         else:
             await message.reply(f"I had trouble with that: {result.error or 'Unknown error'}")
+
+    async def _handle_interbot_message(self, message: discord.Message):
+        """
+        Handle a message from another RALPH bot.
+
+        This enables inter-bot collaboration where bots can:
+        - Send tasks to each other with [TASK]
+        - Respond to tasks with [RESPONSE]
+        - Hand off work with [HANDOFF]
+        - Send alerts with [ALERT]
+        - Ask questions with [QUESTION]
+        """
+        # Get info about the sending bot
+        from_bot = self._bot_registry.get_bot_by_id(message.author.id)
+        if not from_bot:
+            return  # Not a registered bot
+
+        # Parse the message
+        if self._communicator:
+            inter_msg = self._communicator.parse_incoming_message(
+                from_user_id=message.author.id,
+                content=message.content,
+                discord_message_id=message.id,
+                channel_id=message.channel.id
+            )
+
+            if not inter_msg:
+                return
+
+            self.logger.info(
+                f"Inter-bot message from {from_bot.agent_name}: "
+                f"[{inter_msg.message_type.value}] {inter_msg.content[:100]}"
+            )
+
+            # Handle based on message type
+            if inter_msg.message_type == MessageType.TASK:
+                await self._handle_bot_task(message, inter_msg, from_bot)
+
+            elif inter_msg.message_type == MessageType.HANDOFF:
+                await self._handle_bot_handoff(message, inter_msg, from_bot)
+
+            elif inter_msg.message_type == MessageType.QUESTION:
+                await self._handle_bot_question(message, inter_msg, from_bot)
+
+            elif inter_msg.message_type == MessageType.RESPONSE:
+                # Log that we received a response
+                self.logger.info(f"Received response from {from_bot.agent_name}: {inter_msg.content[:100]}")
+                # Could trigger callbacks here if registered
+
+            elif inter_msg.message_type == MessageType.ALERT:
+                # Log alert from another bot
+                self.logger.warning(f"Alert from {from_bot.agent_name}: {inter_msg.content}")
+                # Optionally take action based on alert
+
+            elif inter_msg.message_type == MessageType.ACK:
+                self.logger.info(f"ACK from {from_bot.agent_name}")
+
+    async def _handle_bot_task(self, message: discord.Message, inter_msg: InterBotMessage, from_bot):
+        """Handle a task request from another bot."""
+        # Acknowledge receipt
+        await message.reply(f"[ACK] Received task from **{from_bot.agent_name}**. Processing...")
+
+        # Execute the task
+        context = inter_msg.context.get("full_context", "")
+        result = await self.execute_task(
+            task=inter_msg.content,
+            context=f"Task from {from_bot.agent_name}:\n{context}",
+            notify_channel=True
+        )
+
+        # Send response back to the requesting bot
+        if self._communicator:
+            response_text = result.output if result.status == TaskStatus.COMPLETED else f"Failed: {result.error}"
+            await self._communicator.send_response(
+                to_agent=from_bot.agent_type,
+                result=response_text[:1500],  # Truncate for Discord
+                in_reply_to=inter_msg.message_id,
+                channel_name=message.channel.name
+            )
+
+    async def _handle_bot_handoff(self, message: discord.Message, inter_msg: InterBotMessage, from_bot):
+        """Handle a handoff from another bot."""
+        reason = inter_msg.context.get("reason", "")
+        context = inter_msg.context.get("full_context", "")
+
+        self.logger.info(f"Handoff received from {from_bot.agent_name}: {inter_msg.content}")
+
+        # Acknowledge the handoff
+        await message.reply(
+            f"[ACK] Accepted handoff from **{from_bot.agent_name}**.\n"
+            f"Task: {inter_msg.content[:200]}"
+        )
+
+        # Queue the handoff task
+        if self._coordinator:
+            await self._coordinator.queue_handoff(
+                from_agent=from_bot.agent_type,
+                to_agent=self.agent_type,
+                task=inter_msg.content,
+                context=context
+            )
+        else:
+            # Execute directly if no coordinator
+            await self.execute_task(
+                task=inter_msg.content,
+                context=f"Handoff from {from_bot.agent_name}:\nReason: {reason}\n{context}"
+            )
+
+    async def _handle_bot_question(self, message: discord.Message, inter_msg: InterBotMessage, from_bot):
+        """Handle a question from another bot."""
+        # Respond to the question
+        task = f"Answer this question from {from_bot.agent_name}: {inter_msg.content}"
+        result = await self.execute_task(task, notify_channel=False)
+
+        if self._communicator:
+            response_text = result.output if result.status == TaskStatus.COMPLETED else f"Couldn't answer: {result.error}"
+            await self._communicator.send_response(
+                to_agent=from_bot.agent_type,
+                result=response_text[:1500],
+                in_reply_to=inter_msg.message_id,
+                channel_name=message.channel.name
+            )
 
     def _register_commands(self):
         """Register common bot commands."""
@@ -1903,6 +2057,231 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     f"  Actions: {session.actions_taken}"
                 )
             await ctx.reply("\n".join(output))
+
+    def _register_interbot_commands(self):
+        """Register commands for inter-bot communication."""
+
+        @self.bot.command(name="team")
+        async def team_status(ctx: commands.Context):
+            """Show registered RALPH bots and their status."""
+            online = self._bot_registry.get_online_bots()
+            all_bots = list(self._bot_registry.bots.values())
+
+            embed = discord.Embed(
+                title="RALPH Team Status",
+                description=f"{len(online)}/{len(all_bots)} agents online",
+                color=discord.Color.blue()
+            )
+
+            for bot in all_bots:
+                status = "Online" if bot.is_online else "Offline"
+                embed.add_field(
+                    name=bot.agent_name,
+                    value=f"Status: {status}\nChannel: #{bot.primary_channel}",
+                    inline=True
+                )
+
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="msg")
+        async def send_message_to_agent(ctx: commands.Context, target_agent: str = None, *, message: str = None):
+            """
+            Send a message to another RALPH agent.
+
+            Usage: !msg <agent> <message>
+            Example: !msg backtest Please validate the latest parameter changes
+            """
+            if not target_agent or not message:
+                await ctx.reply(
+                    "**Send Message to Agent**\n"
+                    "Usage: `!msg <agent> <message>`\n\n"
+                    "Agents: `tuning`, `backtest`, `risk`, `strategy`, `data`\n\n"
+                    "Example: `!msg backtest Please validate the latest parameters`"
+                )
+                return
+
+            target = target_agent.lower()
+            valid_agents = ["tuning", "backtest", "risk", "strategy", "data"]
+
+            if target not in valid_agents:
+                await ctx.reply(f"Unknown agent: `{target}`. Valid: {', '.join(valid_agents)}")
+                return
+
+            if target == self.agent_type:
+                await ctx.reply("You can't message yourself!")
+                return
+
+            if not self._communicator:
+                await ctx.reply("Communication system not initialized.")
+                return
+
+            # Send the task
+            inter_msg = await self._communicator.send_task(
+                to_agent=target,
+                task=message,
+                context=f"Request from {self.agent_name}",
+                channel_name="ralph-team"
+            )
+
+            if inter_msg:
+                await ctx.reply(f"Message sent to **{target.title()} Agent** (ID: `{inter_msg.message_id}`)")
+            else:
+                await ctx.reply(f"Failed to send message. Is **{target.title()} Agent** online?")
+
+        @self.bot.command(name="ask_agent")
+        async def ask_agent(ctx: commands.Context, target_agent: str = None, *, question: str = None):
+            """
+            Ask another RALPH agent a question.
+
+            Usage: !ask_agent <agent> <question>
+            """
+            if not target_agent or not question:
+                await ctx.reply(
+                    "Usage: `!ask_agent <agent> <question>`\n"
+                    "Example: `!ask_agent risk What's the current drawdown limit?`"
+                )
+                return
+
+            target = target_agent.lower()
+            valid_agents = ["tuning", "backtest", "risk", "strategy", "data"]
+
+            if target not in valid_agents:
+                await ctx.reply(f"Unknown agent: `{target}`. Valid: {', '.join(valid_agents)}")
+                return
+
+            if not self._communicator:
+                await ctx.reply("Communication system not initialized.")
+                return
+
+            # Get the target bot
+            target_bot = self._bot_registry.get_bot(target)
+            if not target_bot:
+                await ctx.reply(f"**{target.title()} Agent** not registered yet.")
+                return
+
+            # Send the question as a Discord message with @mention
+            guild = self.bot.get_guild(self.guild_id)
+            if not guild:
+                await ctx.reply("Guild not found.")
+                return
+
+            team_channel = discord.utils.get(guild.text_channels, name="ralph-team")
+            if not team_channel:
+                await ctx.reply("Team channel not found.")
+                return
+
+            # Send formatted question
+            question_content = f"<@{target_bot.bot_user_id}> [QUESTION] {question}"
+            await team_channel.send(question_content)
+            await ctx.reply(f"Question sent to **{target.title()} Agent**")
+
+        @self.bot.command(name="alert_team")
+        async def alert_team(ctx: commands.Context, severity: str = "warning", *, alert: str = None):
+            """
+            Send an alert to all RALPH agents.
+
+            Usage: !alert_team [severity] <alert message>
+            Severity: info, warning, error, critical
+            """
+            if not alert:
+                await ctx.reply(
+                    "Usage: `!alert_team [severity] <message>`\n"
+                    "Severities: `info`, `warning`, `error`, `critical`\n\n"
+                    "Example: `!alert_team warning High API latency detected`"
+                )
+                return
+
+            if severity not in ["info", "warning", "error", "critical"]:
+                # severity is actually part of the message
+                alert = f"{severity} {alert}"
+                severity = "warning"
+
+            if not self._communicator:
+                await ctx.reply("Communication system not initialized.")
+                return
+
+            messages = await self._communicator.send_alert(
+                to_agents=["*"],  # All agents
+                alert=alert,
+                severity=severity,
+                channel_name="ralph-team"
+            )
+
+            if messages:
+                await ctx.reply(f"Alert sent to {len(messages)} agents.")
+            else:
+                await ctx.reply("Failed to send alert.")
+
+        @self.bot.command(name="delegate")
+        async def delegate(ctx: commands.Context, target_agent: str = None, *, task: str = None):
+            """
+            Delegate a task to another agent with full handoff.
+
+            Usage: !delegate <agent> <task>
+            This transfers ownership of the task to the target agent.
+            """
+            if not target_agent or not task:
+                await ctx.reply(
+                    "**Delegate Task**\n"
+                    "Usage: `!delegate <agent> <task>`\n\n"
+                    "This hands off work to another agent who takes ownership.\n"
+                    "Example: `!delegate backtest Run validation on the new momentum strategy`"
+                )
+                return
+
+            target = target_agent.lower()
+            valid_agents = ["tuning", "backtest", "risk", "strategy", "data"]
+
+            if target not in valid_agents:
+                await ctx.reply(f"Unknown agent: `{target}`. Valid: {', '.join(valid_agents)}")
+                return
+
+            if not self._communicator:
+                await ctx.reply("Communication system not initialized.")
+                return
+
+            # Send handoff
+            inter_msg = await self._communicator.send_handoff(
+                to_agent=target,
+                task=task,
+                reason=f"Delegated by {self.agent_name}",
+                context="",
+                channel_name="ralph-team"
+            )
+
+            if inter_msg:
+                await ctx.reply(
+                    f"Task delegated to **{target.title()} Agent**\n"
+                    f"Handoff ID: `{inter_msg.message_id}`"
+                )
+            else:
+                await ctx.reply(f"Failed to delegate. Is **{target.title()} Agent** online?")
+
+        @self.bot.command(name="pending")
+        async def pending_tasks(ctx: commands.Context):
+            """Show pending tasks from other agents."""
+            pending = self._bot_registry.get_pending_tasks_for(self.agent_type)
+
+            if not pending:
+                await ctx.reply("No pending tasks from other agents.")
+                return
+
+            embed = discord.Embed(
+                title=f"Pending Tasks for {self.agent_name}",
+                color=discord.Color.gold()
+            )
+
+            for task in pending[:10]:  # Show max 10
+                from_bot = self._bot_registry.get_bot(task.from_agent)
+                from_name = from_bot.agent_name if from_bot else task.from_agent
+
+                embed.add_field(
+                    name=f"{task.message_id} from {from_name}",
+                    value=task.content[:100] + ("..." if len(task.content) > 100 else ""),
+                    inline=False
+                )
+
+            await ctx.reply(embed=embed)
 
     async def _post_task_result(self, channel, result: TaskResult):
         """Post task execution result to Discord."""
