@@ -17,7 +17,12 @@
       "Bash(git rebase:*)",
       "Bash(git stash:*)",
       "Bash(git filter-branch:*)",
-      "Bash(ssh:*)"
+      "Bash(ssh:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(timeout 15 python:*)",
+      "Bash(timeout 20 python:*)"
     ]
   }
 }

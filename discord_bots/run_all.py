@@ -166,25 +166,25 @@ if __name__ == "__main__":
     project_dir = os.getenv("RALPH_PROJECT_DIR", "E:\\Polymarket AI Bot")
 
     print(f"""
-╔═══════════════════════════════════════════════════════════════╗
-║       RALPH Discord Agent Ensemble (Autonomous Mode)          ║
-║                                                               ║
-║   Starting all 5 agents with Claude Code execution:           ║
-║   • Tuning Agent    - Parameter optimization                  ║
-║   • Backtest Agent  - Simulation & metrics                    ║
-║   • Risk Agent      - Safety auditing                         ║
-║   • Strategy Agent  - Logic & features                        ║
-║   • Data Agent      - Preprocessing & denoising               ║
-║                                                               ║
-║   Project Directory: {project_dir:<37} ║
-║                                                               ║
-║   New Commands:                                               ║
-║   • !do <task>           - Execute task with Claude Code      ║
-║   • !handoff <agent> <t> - Hand off task to another agent     ║
-║   • !tasks               - Show running/completed tasks       ║
-║                                                               ║
-║   Press Ctrl+C to shutdown gracefully                         ║
-╚═══════════════════════════════════════════════════════════════╝
++===============================================================+
+|       RALPH Discord Agent Ensemble (Autonomous Mode)          |
+|                                                               |
+|   Starting all 5 agents with Claude Code execution:           |
+|   - Tuning Agent    - Parameter optimization                  |
+|   - Backtest Agent  - Simulation & metrics                    |
+|   - Risk Agent      - Safety auditing                         |
+|   - Strategy Agent  - Logic & features                        |
+|   - Data Agent      - Preprocessing & denoising               |
+|                                                               |
+|   Project Directory: {project_dir:<37} |
+|                                                               |
+|   New Commands:                                               |
+|   - !do <task>           - Execute task with Claude Code      |
+|   - !handoff <agent> <t> - Hand off task to another agent     |
+|   - !tasks               - Show running/completed tasks       |
+|                                                               |
+|   Press Ctrl+C to shutdown gracefully                         |
++===============================================================+
     """)
 
     try:

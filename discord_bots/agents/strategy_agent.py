@@ -42,13 +42,13 @@ class StrategyAgent(BaseAgentBot):
     def _register_strategy_commands(self):
         """Register strategy-specific commands."""
 
-        @self.bot.command(name="propose")
-        async def propose(ctx: commands.Context, strategy_name: str = None, *, description: str = None):
+        @self.bot.command(name="propose_strategy")
+        async def propose_strategy(ctx: commands.Context, strategy_name: str = None, *, description: str = None):
             """Propose a new strategy or modification."""
             if not strategy_name:
                 await ctx.reply(
-                    "Usage: `!propose <strategy_name> <description>`\n"
-                    "Example: `!propose momentum_v3 Add RSI divergence filter to reduce false signals`"
+                    "Usage: `!propose_strategy <strategy_name> <description>`\n"
+                    "Example: `!propose_strategy momentum_v3 Add RSI divergence filter to reduce false signals`"
                 )
                 return
 
