@@ -2708,6 +2708,8 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
         # =========================================================
         # TIERED ORCHESTRATION: Try cheap model first
         # =========================================================
+        recommended_model = None  # Will be set by orchestrator if task needs Claude
+
         if not force_claude and self._orchestrator:
             try:
                 orch_result = await self._orchestrator.process_incoming(
@@ -2715,6 +2717,9 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     from_agent=self.agent_type,
                     context=context or ""
                 )
+
+                # Capture recommended model for Claude execution
+                recommended_model = orch_result.recommended_model
 
                 # If orchestrator handled it, return immediately (saves Claude tokens!)
                 if orch_result.handled:
@@ -2776,12 +2781,13 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 f"Starting task `{task_id}` (Claude Code):\n```\n{task[:300]}\n```"
             )
 
-        # Execute with Claude Code
+        # Execute with Claude Code (using recommended model from orchestrator)
         result = await self._executor.execute(
             agent_name=self.agent_name,
             agent_role=self.agent_role,
             task_prompt=task,
-            context=context
+            context=context,
+            model=recommended_model
         )
 
         # Log Claude response

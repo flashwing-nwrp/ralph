@@ -98,7 +98,8 @@ class ClaudeExecutor:
         task_prompt: str,
         context: Optional[str] = None,
         on_progress: Optional[Callable[[str], None]] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        model: Optional[str] = None
     ) -> TaskResult:
         """
         Execute a task using Claude Code CLI.
@@ -110,6 +111,7 @@ class ClaudeExecutor:
             context: Additional context (e.g., from other agents)
             on_progress: Callback for streaming progress updates
             timeout: Override default timeout
+            model: Claude model to use (e.g., "claude-opus-4-5-20250101", "claude-sonnet-4-20250514")
 
         Returns:
             TaskResult with output and status
@@ -142,15 +144,23 @@ class ClaudeExecutor:
                     self.claude_cmd,
                     "--print",
                     "--dangerously-skip-permissions",
-                    "-",  # Read prompt from stdin
                 ]
+                # Add model selection if specified
+                if model:
+                    cmd.extend(["--model", model])
+                    logger.info(f"[{task_id}] Using model: {model}")
+                cmd.append("-")  # Read prompt from stdin
             else:
                 cmd = [
                     self.claude_cmd,
                     "--print",  # Non-interactive mode
                     "--dangerously-skip-permissions",  # Required for autonomous operation
-                    "-",  # Read prompt from stdin
                 ]
+                # Add model selection if specified
+                if model:
+                    cmd.extend(["--model", model])
+                    logger.info(f"[{task_id}] Using model: {model}")
+                cmd.append("-")  # Read prompt from stdin
 
             logger.debug(f"Command: {cmd}")
             logger.debug(f"Prompt length: {len(full_prompt)} chars")

@@ -78,8 +78,21 @@ class TaskComplexity(Enum):
     """Classification of task complexity."""
     TRIVIAL = "trivial"      # Can be handled locally with pattern matching
     SIMPLE = "simple"        # Cheap LLM can handle (questions, routing, summaries)
-    MODERATE = "moderate"    # Cheap LLM with context
-    COMPLEX = "complex"      # Requires Claude Code (code writing, multi-file edits)
+    MODERATE = "moderate"    # Claude Sonnet - straightforward code tasks
+    COMPLEX = "complex"      # Claude Opus 4.5 - architecture, multi-file, deep reasoning
+
+
+class ClaudeModel(Enum):
+    """Claude models for different task complexities."""
+    SONNET = "claude-sonnet-4-20250514"      # Fast, good for routine tasks
+    OPUS = "claude-opus-4-5-20250101"        # Best reasoning, for complex tasks
+
+
+# Map complexity to recommended Claude model
+COMPLEXITY_TO_MODEL = {
+    TaskComplexity.MODERATE: ClaudeModel.SONNET,
+    TaskComplexity.COMPLEX: ClaudeModel.OPUS,
+}
 
 
 class OrchestratorProvider(Enum):
@@ -109,6 +122,7 @@ class OrchestrationResult:
     summarized_context: Optional[str] = None
     tokens_used: int = 0
     cost_estimate: float = 0.0
+    recommended_model: Optional[str] = None  # Claude model to use if not handled
 
 
 class TaskClassifier:
@@ -680,11 +694,46 @@ Provide a 200-word summary preserving critical information:"""
         # But we can still optimize by summarizing context
         summarized = await self.summarize_context(agent_context, focus=task)
 
+        # Select Claude model based on task complexity and type
+        recommended_model = self._select_claude_model(task, classification.complexity)
+
         return OrchestrationResult(
             handled=False,
             route_to_agent=classification.suggested_agent,
-            summarized_context=summarized
+            summarized_context=summarized,
+            recommended_model=recommended_model
         )
+
+    def _select_claude_model(self, task: str, complexity: TaskComplexity) -> str:
+        """
+        Select the appropriate Claude model based on task characteristics.
+
+        Opus 4.5 for:
+        - Planning, architecture, strategy tasks
+        - Complex multi-file changes
+        - Deep analysis and reasoning
+
+        Sonnet for:
+        - Routine code changes
+        - Simple fixes and updates
+        - Running scripts/tests
+        """
+        task_lower = task.lower()
+
+        # Always use Opus for planning/strategy/architecture
+        planning_indicators = [
+            "plan", "design", "architect", "strategy", "approach",
+            "how should", "what's the best way", "recommend",
+            "analyze", "investigate", "diagnose", "debug complex",
+            "refactor", "redesign", "proposal", "evaluate options"
+        ]
+
+        if any(indicator in task_lower for indicator in planning_indicators):
+            return ClaudeModel.OPUS.value
+
+        # Use complexity mapping for other tasks
+        model = COMPLEXITY_TO_MODEL.get(complexity, ClaudeModel.SONNET)
+        return model.value
 
     async def process_incoming(
         self,
