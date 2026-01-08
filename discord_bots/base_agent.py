@@ -46,6 +46,12 @@ from bot_communication import (
     InterBotMessage, MessageParser
 )
 
+# Tiered LLM Orchestration (cost optimization)
+from orchestration_layer import (
+    get_orchestration_layer, OrchestrationLayer, TaskComplexity,
+    OrchestrationResult
+)
+
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
     """Configure logging for an agent with colored output and optional file logging."""
@@ -169,6 +175,11 @@ class BaseAgentBot(ABC):
         # Inter-bot communication
         self._bot_registry = get_bot_registry()
         self._communicator: Optional[BotCommunicator] = None  # Initialized in on_ready
+
+        # Tiered LLM orchestration (cost optimization)
+        # Uses cheap models (GPT-4o-mini/Haiku) for routing & simple tasks
+        # Only escalates to Claude Code for complex work
+        self._orchestrator = get_orchestration_layer()
 
         # Discord client setup with minimal intents
         intents = discord.Intents.default()
@@ -2283,6 +2294,78 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
 
             await ctx.reply(embed=embed)
 
+        # =====================================================================
+        # ORCHESTRATION COMMANDS (Cost Optimization)
+        # =====================================================================
+
+        @self.bot.command(name="orch_stats")
+        async def orchestration_stats(ctx: commands.Context):
+            """Show orchestration layer statistics (token savings)."""
+            if not self._orchestrator:
+                await ctx.reply("Orchestration layer not initialized.")
+                return
+
+            report = self._orchestrator.get_stats_report()
+            await ctx.reply(report)
+
+        @self.bot.command(name="orch_provider")
+        async def orchestration_provider(ctx: commands.Context):
+            """Show which LLM provider is being used for orchestration."""
+            if not self._orchestrator:
+                await ctx.reply("Orchestration layer not initialized.")
+                return
+
+            provider = self._orchestrator.provider.value
+            model = self._orchestrator.model or "local patterns only"
+
+            embed = discord.Embed(
+                title="Orchestration Provider",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Provider", value=provider.upper(), inline=True)
+            embed.add_field(name="Model", value=model, inline=True)
+            embed.add_field(
+                name="Purpose",
+                value="Handles simple tasks cheaply, reserves Claude Code for complex work",
+                inline=False
+            )
+
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="classify")
+        async def classify_task(ctx: commands.Context, *, task: str = None):
+            """Classify a task to see how it would be routed."""
+            if not task:
+                await ctx.reply("Usage: `!classify <task description>`")
+                return
+
+            if not self._orchestrator:
+                await ctx.reply("Orchestration layer not initialized.")
+                return
+
+            result = await self._orchestrator.classify_task(task)
+
+            embed = discord.Embed(
+                title="Task Classification",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Task", value=task[:200], inline=False)
+            embed.add_field(name="Complexity", value=result.complexity.value.upper(), inline=True)
+            embed.add_field(name="Confidence", value=f"{result.confidence:.0%}", inline=True)
+            embed.add_field(name="Reasoning", value=result.reasoning, inline=False)
+
+            if result.suggested_agent:
+                embed.add_field(name="Suggested Agent", value=result.suggested_agent.title(), inline=True)
+
+            if result.can_handle_locally:
+                embed.add_field(name="Handling", value="Can be handled locally (no LLM needed)", inline=False)
+            elif result.complexity == TaskComplexity.SIMPLE:
+                embed.add_field(name="Handling", value="Will use cheap LLM (GPT-4o-mini/Haiku)", inline=False)
+            else:
+                embed.add_field(name="Handling", value="Will use Claude Code", inline=False)
+
+            await ctx.reply(embed=embed)
+
     async def _post_task_result(self, channel, result: TaskResult):
         """Post task execution result to Discord."""
         # Determine color based on status
@@ -2313,30 +2396,30 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
         self,
         task: str,
         context: Optional[str] = None,
-        notify_channel: bool = True
+        notify_channel: bool = True,
+        force_claude: bool = False
     ) -> TaskResult:
         """
-        Execute a task using Claude Code.
+        Execute a task with tiered LLM orchestration.
+
+        Flow:
+        1. Orchestrator classifies the task (cheap/free)
+        2. If simple: handled by cheap LLM (GPT-4o-mini/Haiku)
+        3. If complex: escalate to Claude Code with summarized context
 
         Args:
             task: The task description
             context: Additional context from other agents
             notify_channel: Whether to post updates to Discord
+            force_claude: Skip orchestration and go straight to Claude Code
 
         Returns:
             TaskResult with output and status
         """
-        if not self._executor:
-            return TaskResult(
-                task_id="ERROR",
-                status=TaskStatus.FAILED,
-                output="",
-                error="Executor not initialized"
-            )
+        task_id = f"{self.agent_type[:3].upper()}-{datetime.utcnow().strftime('%H%M%S')}"
 
         # Get context from coordinator if available
         if not context and self._coordinator:
-            # Get relevant context based on handoff rules
             related_agents = []
             for trigger, targets in HANDOFF_RULES.get(self.agent_type, {}).items():
                 if "*" in targets:
@@ -2345,16 +2428,61 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 related_agents.extend(targets)
             context = self._coordinator.get_context_for(self.agent_type, related_agents)
 
-        # Track the task
-        task_id = f"{self.agent_type[:3].upper()}-{datetime.utcnow().strftime('%H%M%S')}"
+        # =========================================================
+        # TIERED ORCHESTRATION: Try cheap model first
+        # =========================================================
+        if not force_claude and self._orchestrator:
+            try:
+                orch_result = await self._orchestrator.process_incoming(
+                    task=task,
+                    from_agent=self.agent_type,
+                    context=context or ""
+                )
+
+                # If orchestrator handled it, return immediately (saves Claude tokens!)
+                if orch_result.handled:
+                    self.logger.info(f"Task handled by orchestrator (saved Claude tokens)")
+
+                    if notify_channel and orch_result.response:
+                        await self.post_to_primary_channel(
+                            f"Task `{task_id}` handled (orchestrated):\n{orch_result.response[:500]}"
+                        )
+
+                    return TaskResult(
+                        task_id=task_id,
+                        status=TaskStatus.COMPLETED,
+                        output=orch_result.response or "Task handled by orchestrator",
+                        error=None,
+                        duration_seconds=0.0
+                    )
+
+                # Use summarized context if provided (reduces Claude tokens)
+                if orch_result.summarized_context:
+                    self.logger.info(f"Using summarized context (saved ~{len(context or '') - len(orch_result.summarized_context)} chars)")
+                    context = orch_result.summarized_context
+
+            except Exception as e:
+                self.logger.warning(f"Orchestration failed, falling back to Claude: {e}")
+
+        # =========================================================
+        # COMPLEX TASK: Use Claude Code
+        # =========================================================
+        if not self._executor:
+            return TaskResult(
+                task_id=task_id,
+                status=TaskStatus.FAILED,
+                output="",
+                error="Executor not initialized"
+            )
+
         self.running_tasks[task_id] = task[:100]
 
         if notify_channel:
             await self.post_to_primary_channel(
-                f"Starting task `{task_id}`:\n```\n{task[:300]}\n```"
+                f"Starting task `{task_id}` (Claude Code):\n```\n{task[:300]}\n```"
             )
 
-        # Execute
+        # Execute with Claude Code
         result = await self._executor.execute(
             agent_name=self.agent_name,
             agent_role=self.agent_role,

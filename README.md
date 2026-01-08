@@ -181,6 +181,72 @@ Agents can propose system improvements during their work, queued for operator re
 | `!delegate <agent> <task>` | Hand off a task to another agent |
 | `!pending` | Show pending tasks from other agents |
 
+### Cost Optimization (Orchestration)
+| Command | Description |
+|---------|-------------|
+| `!orch_stats` | View token savings statistics |
+| `!orch_provider` | Show orchestration LLM provider |
+| `!classify <task>` | Preview how a task would be classified |
+
+## Tiered LLM Architecture (Cost Optimization)
+
+RALPH uses a tiered approach to minimize Claude Code token usage:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Incoming Task                            │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+          ┌───────────▼───────────┐
+          │   Orchestration Layer  │  ← GPT-4o-mini / Claude Haiku
+          │   (Cheap & Fast)       │     ~$0.15-0.25/1M tokens
+          └───────────┬───────────┘
+                      │
+    ┌─────────────────┼─────────────────┐
+    │                 │                 │
+    ▼                 ▼                 ▼
+┌────────┐     ┌────────────┐    ┌───────────┐
+│TRIVIAL │     │  SIMPLE    │    │  COMPLEX  │
+│ Local  │     │ Cheap LLM  │    │Claude Code│
+│ Free   │     │ ~90% less  │    │ Full power│
+└────────┘     └────────────┘    └───────────┘
+```
+
+### What Each Tier Handles
+
+| Tier | Handled By | Examples |
+|------|-----------|----------|
+| **Trivial** | Local patterns (free) | Status checks, pings, ACKs |
+| **Simple** | GPT-4o-mini/Haiku | Questions, routing, summaries |
+| **Complex** | Claude Code | Code writing, multi-file edits, analysis |
+
+### Token Savings
+
+- **Simple Q&A**: ~90% savings (500 tokens vs 5000)
+- **Routing decisions**: ~95% savings (handled locally)
+- **Context summarization**: ~60% savings (compress before Claude)
+
+### Configuration
+
+The orchestration layer automatically finds your OpenAI API key from:
+
+1. **Environment variable**: `OPENAI_API_KEY` in `.env`
+2. **Polymarket config**: `config.yaml` in your Polymarket AI Bot directory
+
+```env
+# Option 1: Set directly in .env
+OPENAI_API_KEY=sk-...
+
+# Option 2: Already in Polymarket config.yaml? Just set the path:
+POLYMARKET_PROJECT_DIR=/path/to/polymarket-ai-bot
+# The key will be loaded from config.yaml automatically
+
+# Option 3: Use Anthropic Haiku instead
+# Falls back to ANTHROPIC_API_KEY (already set for Claude Code)
+
+# If no API key is found, falls back to local pattern matching only
+```
+
 ## Inter-Bot Communication
 
 RALPH agents communicate with each other using Discord @mentions. This enables autonomous collaboration where agents can:
@@ -355,6 +421,7 @@ ralph/
 │   ├── scrum_manager.py       # SCRUM methodology
 │   ├── improvement_proposals.py
 │   ├── bot_communication.py   # Inter-bot @mention communication
+│   ├── orchestration_layer.py # Tiered LLM cost optimization
 │   │
 │   ├── # P0 Critical Systems
 │   ├── emergency_controls.py  # Kill switch, circuit breakers
