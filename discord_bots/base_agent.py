@@ -2996,6 +2996,14 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     )
                     await self.post_embed_to_team(error_embed)
 
+                    # Self-healing: Check if this is a fixable code error
+                    await self._attempt_self_healing(
+                        error=result.error or "Unknown error",
+                        task_description=next_task.description,
+                        task_id=next_task.task_id,
+                        mission_manager=mission_manager
+                    )
+
             except asyncio.CancelledError:
                 self.logger.info("Mission task processor cancelled")
                 break
@@ -3127,6 +3135,85 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     pass
 
         return channel
+
+    async def _attempt_self_healing(
+        self,
+        error: str,
+        task_description: str,
+        task_id: str,
+        mission_manager
+    ):
+        """
+        Attempt to self-heal by creating a fix task when code errors occur.
+
+        Detects fixable errors like:
+        - NameError (undefined variables/functions)
+        - ImportError (missing imports)
+        - SyntaxError
+        - AttributeError
+        - TypeError in code
+
+        Creates a new task to investigate and fix the issue.
+        """
+        import re
+
+        # Patterns that indicate fixable code errors
+        fixable_patterns = [
+            (r"NameError.*name '(\w+)' is not defined", "undefined_name"),
+            (r"ImportError.*No module named '([\w\.]+)'", "missing_import"),
+            (r"ModuleNotFoundError.*No module named '([\w\.]+)'", "missing_module"),
+            (r"SyntaxError", "syntax_error"),
+            (r"AttributeError.*'(\w+)' object has no attribute '(\w+)'", "missing_attribute"),
+            (r"TypeError.*(\w+)\(\) got.*argument", "type_error"),
+            (r"IndentationError", "indentation_error"),
+        ]
+
+        error_type = None
+        for pattern, etype in fixable_patterns:
+            if re.search(pattern, error, re.IGNORECASE):
+                error_type = etype
+                break
+
+        if not error_type:
+            self.logger.debug(f"Error not recognized as self-healable: {error[:100]}")
+            return
+
+        self.logger.info(f"Detected fixable error ({error_type}), creating self-healing task")
+
+        # Create a healing task
+        healing_task_desc = f"""FIX CODE ERROR: {error_type}
+
+Original task that failed: {task_description[:300]}
+
+Error encountered:
+{error[:500]}
+
+Instructions:
+1. Read the file(s) mentioned in the error traceback
+2. Identify the root cause of the error
+3. Fix the code to resolve the error
+4. If the error is in RALPH agent code (discord_bots/), fix it there
+5. If it's in the target project, fix it in the appropriate file
+6. Verify the fix compiles/runs without the same error"""
+
+        # Post notification
+        await self.post_to_team_channel(
+            f"🔧 **Self-Healing Triggered** | `{task_id}`\n"
+            f"Detected: `{error_type}`\n"
+            f"Creating fix task for {self.agent_type.title()} Agent..."
+        )
+
+        # Add healing task to mission
+        try:
+            if mission_manager and mission_manager.current_mission:
+                await mission_manager.add_task(
+                    description=healing_task_desc,
+                    agent=self.agent_type,  # Same agent attempts the fix
+                    priority=1  # High priority
+                )
+                self.logger.info(f"Added self-healing task for {error_type}")
+        except Exception as e:
+            self.logger.error(f"Failed to create self-healing task: {e}")
 
     async def _generate_mission_summary(self, mission, mission_manager):
         """
