@@ -83,7 +83,7 @@ class StrategyAgent(BaseAgentBot):
 
             # Notify the team
             await self._post_to_channel(
-                "ralph-team",
+                "ralph_team",
                 f"**Strategy Agent** submitted proposal `{proposal_id}`: **{strategy_name}**\n"
                 f"Description: {description or 'N/A'}\n\n"
                 f"Requesting review from all agents."

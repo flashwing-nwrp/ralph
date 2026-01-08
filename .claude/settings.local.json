@@ -24,7 +24,8 @@
       "Bash(timeout 15 python:*)",
       "Bash(timeout 20 python:*)",
       "Bash(timeout 25 python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(claude --print --dangerously-skip-permissions \"Say hello in 5 words or less\")"
     ]
   }
 }

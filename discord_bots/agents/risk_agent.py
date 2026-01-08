@@ -133,7 +133,7 @@ class RiskAgent(BaseAgentBot):
             # If rejected, alert the team
             if "REJECTED" in verdict:
                 await self._post_to_channel(
-                    "ralph-team",
+                    "ralph_team",
                     f"**RISK ALERT**: Audit `{audit_id}` for `{target}` was **REJECTED**. "
                     f"Strategy Agent and Tuning Agent: Please review and adjust parameters."
                 )
@@ -221,7 +221,7 @@ class RiskAgent(BaseAgentBot):
             # Post to team channel if critical
             if level == "CRITICAL":
                 await self._post_to_channel(
-                    "ralph-team",
+                    "ralph_team",
                     f"🚨 **CRITICAL RISK ALERT** 🚨\n{message}\n\nAll agents: Please acknowledge."
                 )
 
@@ -243,7 +243,7 @@ class RiskAgent(BaseAgentBot):
         # Flag dangerous keywords
         danger_keywords = ["yolo", "all in", "max leverage", "ignore risk"]
         if any(kw in content_lower for kw in danger_keywords):
-            if message.channel.name in ["strategy", "ralph-team", "tuning"]:
+            if message.channel.name in ["strategy", "ralph_team", "tuning"]:
                 await message.reply(
                     "⚠️ **Risk Agent Notice**: Detected potentially risky language. "
                     "Please ensure all strategies comply with risk limits (`!limits`)."

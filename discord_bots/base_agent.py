@@ -748,7 +748,7 @@ class BaseAgentBot(ABC):
                 return
 
             await self.post_to_team_channel(f"**OPERATOR BROADCAST:**\n{message}")
-            await ctx.reply("Broadcast sent to #ralph-team")
+            await ctx.reply("Broadcast sent to #ralph_team")
 
         # VPS Deployment Commands
 
@@ -921,7 +921,7 @@ You are receiving a new mission from the operator. Your job is to:
    - strategy: Strategy logic, signal generation (yourself)
 
 4. Identify dependencies between tasks (what must complete before what)
-5. Post a mission plan to #ralph-team
+5. Post a mission plan to #ralph_team
 
 After planning, begin executing by handing off tasks to the appropriate agents.
 
@@ -2156,7 +2156,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 to_agent=target,
                 task=message,
                 context=f"Request from {self.agent_name}",
-                channel_name="ralph-team"
+                channel_name="ralph_team"
             )
 
             if inter_msg:
@@ -2201,7 +2201,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 await ctx.reply("Guild not found.")
                 return
 
-            team_channel = discord.utils.get(guild.text_channels, name="ralph-team")
+            team_channel = discord.utils.get(guild.text_channels, name="ralph_team")
             if not team_channel:
                 await ctx.reply("Team channel not found.")
                 return
@@ -2240,7 +2240,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 to_agents=["*"],  # All agents
                 alert=alert,
                 severity=severity,
-                channel_name="ralph-team"
+                channel_name="ralph_team"
             )
 
             if messages:
@@ -2282,7 +2282,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 task=task,
                 reason=f"Delegated by {self.agent_name}",
                 context="",
-                channel_name="ralph-team"
+                channel_name="ralph_team"
             )
 
             if inter_msg:
@@ -2575,8 +2575,8 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
         return await self._post_to_channel(self.primary_channel_name, content)
 
     async def post_to_team_channel(self, content: str) -> Optional[discord.Message]:
-        """Post a message to the #ralph-team channel."""
-        return await self._post_to_channel("ralph-team", content)
+        """Post a message to the #ralph_team channel."""
+        return await self._post_to_channel("ralph_team", content)
 
     async def mention_agent(self, agent_role_name: str, message: str):
         """

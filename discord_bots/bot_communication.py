@@ -394,7 +394,7 @@ class BotCommunicator:
         to_agent: str,
         task: str,
         context: str = "",
-        channel_name: str = "ralph-team"
+        channel_name: str = "ralph_team"
     ) -> Optional[InterBotMessage]:
         """
         Send a task to another agent via @mention.
@@ -464,7 +464,7 @@ class BotCommunicator:
         to_agent: str,
         result: str,
         in_reply_to: str = "",
-        channel_name: str = "ralph-team"
+        channel_name: str = "ralph_team"
     ) -> Optional[InterBotMessage]:
         """
         Send a response to another agent.
@@ -532,7 +532,7 @@ class BotCommunicator:
         task: str,
         reason: str = "",
         context: str = "",
-        channel_name: str = "ralph-team"
+        channel_name: str = "ralph_team"
     ) -> Optional[InterBotMessage]:
         """
         Send a handoff to another agent.
@@ -592,7 +592,7 @@ class BotCommunicator:
         to_agents: List[str],
         alert: str,
         severity: str = "warning",
-        channel_name: str = "ralph-team"
+        channel_name: str = "ralph_team"
     ) -> List[InterBotMessage]:
         """
         Send an alert to multiple agents.
@@ -672,7 +672,7 @@ class BotCommunicator:
         self,
         content: str,
         message_type: MessageType = MessageType.INFO,
-        channel_name: str = "ralph-team"
+        channel_name: str = "ralph_team"
     ) -> Optional[InterBotMessage]:
         """
         Broadcast a message to all agents (no specific @mention, just team channel).

@@ -127,7 +127,7 @@ class TuningAgent(BaseAgentBot):
         # Respond to questions about parameters
         if any(word in content_lower for word in ["learning rate", "lr", "hyperparameter", "tune"]):
             # Check if this is in our channel or mentions us
-            if message.channel.name in ["tuning", "ralph-team"]:
+            if message.channel.name in ["tuning", "ralph_team"]:
                 if "?" in message.content and self.bot.user not in message.mentions:
                     # Don't auto-respond unless directly mentioned or it's a clear question for us
                     pass
