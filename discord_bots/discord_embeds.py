@@ -274,38 +274,46 @@ class RALPHEmbeds:
         duration_seconds: float = 0,
         task_id: str = None
     ) -> discord.Embed:
-        """Create embed for agent task completion."""
+        """Create embed for agent task completion with support for longer outputs."""
         emoji = get_agent_emoji(agent_type)
         color = get_agent_color(agent_type)
+        title = AGENT_TITLES.get(agent_type, agent_type.title())
+
+        # Build header with task info
+        header = f"**Task:** {task_description[:150]}" if task_description else ""
+        if task_id:
+            header = f"`{task_id}` | {header}"
+
+        # Use description for longer output (4096 char limit vs 1024 for fields)
+        # Truncate intelligently - try to end at a sentence or line break
+        summary = result_summary or "Success"
+        if len(summary) > 3800:
+            # Find a good break point
+            break_points = ["\n\n", "\n", ". ", ", "]
+            truncated = summary[:3800]
+            for bp in break_points:
+                last_break = truncated.rfind(bp)
+                if last_break > 3000:
+                    truncated = truncated[:last_break + len(bp)]
+                    break
+            summary = truncated + "\n\n*[Output truncated...]*"
 
         embed = discord.Embed(
-            title=f"{emoji} {agent_type.title()} Agent Complete",
+            title=f"✅ {title} Complete",
+            description=f"{header}\n\n{summary}",
             color=color,
             timestamp=datetime.utcnow()
         )
-        embed.add_field(
-            name="\u2705 Task",
-            value=task_description[:200] if task_description else "Task completed",
-            inline=False
-        )
-        embed.add_field(
-            name="Result",
-            value=result_summary[:500] if result_summary else "Success",
-            inline=False
-        )
+
+        # Add metadata as inline fields
         if duration_seconds > 0:
             embed.add_field(
-                name="Duration",
+                name="⏱️ Duration",
                 value=f"{duration_seconds:.1f}s",
                 inline=True
             )
-        if task_id:
-            embed.add_field(
-                name="Task ID",
-                value=f"`{task_id}`",
-                inline=True
-            )
-        embed.set_footer(text="RALPH | Task Complete")
+
+        embed.set_footer(text=f"RALPH | {agent_type.title()} Agent")
         return embed
 
     @staticmethod

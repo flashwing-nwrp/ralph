@@ -2831,11 +2831,13 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 # Mark task as in progress
                 await mission_manager.update_task_status(next_task.task_id, "in_progress")
 
-                # Notify team
-                await self.post_to_team_channel(
-                    f"**{self.agent_name}** starting task `{next_task.task_id}`:\n"
-                    f"```{next_task.description[:300]}```"
+                # Notify team with embed
+                working_embed = RALPHEmbeds.agent_working(
+                    agent_type=self.agent_type,
+                    task_description=next_task.description[:400],
+                    task_id=next_task.task_id
                 )
+                await self.post_embed_to_team(working_embed)
 
                 # Execute the task
                 result = await self.execute_task(
@@ -2849,26 +2851,35 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 if result.status == TaskStatus.COMPLETED:
                     await mission_manager.complete_task(next_task.task_id, result.output[:1000])
 
-                    # Post completion summary to team
-                    await self.post_to_team_channel(
-                        f"**{self.agent_name}** completed `{next_task.task_id}`\n"
-                        f"**Output summary:**\n{result.output[:500]}"
+                    # Post completion embed to team
+                    complete_embed = RALPHEmbeds.agent_complete(
+                        agent_type=self.agent_type,
+                        task_description=next_task.description[:200],
+                        result_summary=result.output[:1500] if result.output else "Completed",
+                        duration_seconds=result.duration_seconds,
+                        task_id=next_task.task_id
                     )
+                    await self.post_embed_to_team(complete_embed)
 
                     # Check if mission is now complete
                     progress = mission.get_progress()
                     if progress['completed'] == progress['total']:
-                        await self.post_to_team_channel(
-                            f"**MISSION COMPLETE!** {mission.mission_id}\n\n"
-                            f"All {progress['total']} tasks completed successfully.\n"
-                            f"**Objective:** {mission.objective}"
+                        mission_complete_embed = RALPHEmbeds.mission_complete(
+                            mission_id=mission.mission_id,
+                            objective=mission.objective,
+                            total_tasks=progress['total'],
+                            duration_seconds=0  # Could calculate from mission start
                         )
+                        await self.post_embed_to_team(mission_complete_embed)
                 else:
                     await mission_manager.update_task_status(next_task.task_id, "failed")
-                    await self.post_to_team_channel(
-                        f"**{self.agent_name}** failed task `{next_task.task_id}`:\n"
-                        f"Error: {result.error or 'Unknown error'}"
+                    error_embed = RALPHEmbeds.agent_error(
+                        agent_type=self.agent_type,
+                        task_description=next_task.description[:200],
+                        error_message=result.error or "Unknown error",
+                        task_id=next_task.task_id
                     )
+                    await self.post_embed_to_team(error_embed)
 
             except asyncio.CancelledError:
                 self.logger.info("Mission task processor cancelled")
