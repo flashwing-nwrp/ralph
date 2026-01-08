@@ -1193,6 +1193,54 @@ class BaseAgentBot(ABC):
                 f"Mission {mission_id} has been cancelled. All agents stand by."
             )
 
+        @self.bot.command(name="retry")
+        async def retry_task(ctx: commands.Context, task_id: str = None):
+            """Retry a failed task (owner only)."""
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can retry tasks.")
+                return
+
+            if not task_id:
+                await ctx.reply("Usage: `!retry <task_id>` (e.g., `!retry M-0010-T18`)")
+                return
+
+            manager = get_mission_manager()
+            if not manager.current_mission:
+                await ctx.reply("No active mission.")
+                return
+
+            # Find the failed task
+            task_id = task_id.upper()
+            failed_task = None
+            for task in manager.current_mission.tasks:
+                if task.task_id == task_id:
+                    failed_task = task
+                    break
+
+            if not failed_task:
+                await ctx.reply(f"Task `{task_id}` not found.")
+                return
+
+            if failed_task.status != "failed":
+                await ctx.reply(f"Task `{task_id}` is not failed (status: {failed_task.status}).")
+                return
+
+            # Reset to pending so it gets picked up
+            failed_task.status = "pending"
+            failed_task.output = ""
+            await manager._save_current_mission()
+
+            await ctx.reply(f"Task `{task_id}` reset to pending. {failed_task.assigned_to.title()} Agent will pick it up.")
+            await self.post_to_team_channel(
+                f"🔄 **Task Retry**: `{task_id}` reset by {ctx.author.mention}\n"
+                f"**Agent**: {failed_task.assigned_to.title()}\n"
+                f"**Task**: {failed_task.description[:150]}..."
+            )
+
     def _register_proposal_commands(self):
         """Register commands for improvement proposals."""
 
@@ -3005,9 +3053,10 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             if not mission:
                 return
 
-            # Count pending tasks
+            # Count task statuses
             pending_tasks = [t for t in mission.tasks if t.status == "pending"]
             completed_tasks = [t for t in mission.tasks if t.status == "completed"]
+            failed_tasks = [t for t in mission.tasks if t.status == "failed"]
 
             if mission.status in [MissionStatus.IN_PROGRESS, MissionStatus.PLANNING]:
                 # Create a resume notification embed
@@ -3026,6 +3075,12 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     value=f"⏳ {len(pending_tasks)} tasks remaining",
                     inline=True
                 )
+                if failed_tasks:
+                    embed.add_field(
+                        name="Failed",
+                        value=f"❌ {len(failed_tasks)} task(s)",
+                        inline=True
+                    )
 
                 # Show which agents have pending work
                 agent_tasks = {}
@@ -3040,6 +3095,15 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     embed.add_field(
                         name="Agent Workload",
                         value=task_summary,
+                        inline=False
+                    )
+
+                # Show failed tasks
+                if failed_tasks:
+                    failed_summary = "\n".join([f"• `{t.task_id}` ({t.assigned_to})" for t in failed_tasks[:3]])
+                    embed.add_field(
+                        name="⚠️ Failed Tasks (use !retry <task_id>)",
+                        value=failed_summary,
                         inline=False
                     )
 

@@ -25,7 +25,16 @@
       "Bash(timeout 20 python:*)",
       "Bash(timeout 25 python:*)",
       "Bash(pip install:*)",
-      "Bash(claude --print --dangerously-skip-permissions \"Say hello in 5 words or less\")"
+      "Bash(claude --print --dangerously-skip-permissions \"Say hello in 5 words or less\")",
+      "Bash(taskkill:*)",
+      "Bash(taskkill /F /FI \"IMAGENAME eq python.exe\" /FI \"WINDOWTITLE eq *discord*\")",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(where:*)",
+      "Bash(\"C:\\\\Users\\\\toddw\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd\" --version)",
+      "Bash(\"C:\\\\Users\\\\toddw\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd\" --print --dangerously-skip-permissions -)",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /FO CSV)",
+      "Bash(cat:*)"
     ]
   }
 }
