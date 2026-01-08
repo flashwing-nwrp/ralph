@@ -75,7 +75,9 @@ class ClaudeExecutor:
         progress_file: str = "agent_progress.txt"
     ):
         self.project_dir = Path(project_dir or os.getenv("RALPH_PROJECT_DIR", "."))
-        self.claude_cmd = claude_cmd or os.getenv("CLAUDE_CMD", "claude")
+        # Normalize Claude command path for Windows compatibility
+        raw_claude_cmd = claude_cmd or os.getenv("CLAUDE_CMD", "claude")
+        self.claude_cmd = str(Path(raw_claude_cmd)) if raw_claude_cmd else "claude"
         self.timeout = timeout
         self.progress_file = self.project_dir / progress_file
 
@@ -125,27 +127,53 @@ class ClaudeExecutor:
             # Build command arguments
             # -p/--print: Non-interactive mode (required for automation)
             # --dangerously-skip-permissions: Bypass permission prompts (for autonomous operation)
-            cmd = [
-                self.claude_cmd,
-                "--print",  # Non-interactive mode
-                "--dangerously-skip-permissions",  # Required for autonomous operation
-                full_prompt,
-            ]
 
-            # Execute Claude Code
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(self.project_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL
-            )
+            # On Windows, .cmd files need to go through cmd.exe
+            import sys
+            is_windows_cmd = sys.platform == "win32" and self.claude_cmd.lower().endswith(".cmd")
+            logger.debug(f"Platform: {sys.platform}, claude_cmd: {self.claude_cmd}, is_windows_cmd: {is_windows_cmd}")
 
-            # Wait with timeout
+            # Use stdin for prompt to avoid Windows command-line length limit (~8192 chars)
+            # Claude Code accepts prompt from stdin with --print flag
+            if is_windows_cmd:
+                # Use cmd.exe /c to execute .cmd files on Windows
+                cmd = [
+                    "cmd.exe", "/c",
+                    self.claude_cmd,
+                    "--print",
+                    "--dangerously-skip-permissions",
+                    "-",  # Read prompt from stdin
+                ]
+            else:
+                cmd = [
+                    self.claude_cmd,
+                    "--print",  # Non-interactive mode
+                    "--dangerously-skip-permissions",  # Required for autonomous operation
+                    "-",  # Read prompt from stdin
+                ]
+
+            logger.debug(f"Command: {cmd}")
+            logger.debug(f"Prompt length: {len(full_prompt)} chars")
+
+            # Execute Claude Code with prompt via stdin
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(self.project_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.PIPE  # Enable stdin for prompt
+                )
+                logger.debug(f"Process created successfully, PID: {process.pid}")
+            except FileNotFoundError as e:
+                logger.error(f"FileNotFoundError creating subprocess: {e}")
+                raise
+
+            # Wait with timeout, sending prompt via stdin
             effective_timeout = timeout or self.timeout
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    process.communicate(input=full_prompt.encode("utf-8")),
                     timeout=effective_timeout
                 )
             except asyncio.TimeoutError:
@@ -215,34 +243,30 @@ class ClaudeExecutor:
     ) -> str:
         """Build the full prompt with agent persona and context."""
 
+        # Build a more action-oriented prompt
         prompt_parts = [
-            f"# Agent Identity",
-            f"You are the **{agent_name}** for the RALPH autonomous trading system.",
+            f"You are {agent_name}. Your working directory is set to the project.",
             f"",
-            f"## Your Role",
-            f"{agent_role}",
-            f"",
-            f"## Working Guidelines",
-            f"- Focus ONLY on your area of expertise",
-            f"- Be concise and actionable in your outputs",
-            f"- If you need input from another agent, clearly state what you need",
-            f"- Update relevant files when making changes",
-            f"- Summarize your findings/actions at the end",
+            f"TASK: {task_prompt}",
             f"",
         ]
 
         if context:
             prompt_parts.extend([
-                f"## Context from Other Agents",
-                f"{context}",
+                f"CONTEXT: {context}",
                 f"",
             ])
 
         prompt_parts.extend([
-            f"## Current Task",
-            f"{task_prompt}",
+            f"INSTRUCTIONS:",
+            f"1. First, use Glob and Read tools to explore relevant files",
+            f"2. Analyze what you find",
+            f"3. Output any tasks in format: [TASK: agent_type] specific task description",
+            f"4. Output any handoffs in format: [HANDOFF: agent_type] description",
             f"",
-            f"Execute this task now. Be thorough but focused.",
+            f"Valid agent_types: tuning, backtest, risk, data, strategy",
+            f"",
+            f"Begin by exploring the codebase.",
         ])
 
         return "\n".join(prompt_parts)

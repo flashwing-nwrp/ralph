@@ -206,6 +206,39 @@ class MissionManager:
         # Load existing mission if present
         self._load_current_mission()
 
+        # Recover any tasks that were in_progress when we crashed
+        self._recover_crashed_tasks()
+
+    def _recover_crashed_tasks(self):
+        """
+        Recover tasks that were in_progress when the bot crashed.
+
+        On startup, any task marked as 'in_progress' is assumed to have
+        been interrupted by a crash. We reset them to 'pending' so they
+        can be picked up and retried.
+        """
+        if not self.current_mission:
+            return
+
+        recovered_count = 0
+        for task in self.current_mission.tasks:
+            if task.status == "in_progress":
+                task.status = "pending"
+                recovered_count += 1
+                logger.info(f"Recovered crashed task: {task.task_id} -> pending")
+
+        if recovered_count > 0:
+            self.current_mission.notes.append(
+                f"[{datetime.utcnow().strftime('%H:%M:%S')}] Recovered {recovered_count} crashed task(s)"
+            )
+            # Save immediately (synchronous for startup)
+            try:
+                with open(self.mission_file, "w", encoding="utf-8") as f:
+                    json.dump(self.current_mission.to_dict(), f, indent=2)
+                logger.info(f"Recovered {recovered_count} crashed tasks to pending state")
+            except Exception as e:
+                logger.error(f"Failed to save recovered tasks: {e}")
+
     def _load_current_mission(self):
         """Load the current mission from file."""
         try:

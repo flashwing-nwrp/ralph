@@ -29,6 +29,8 @@ load_dotenv()
 from claude_executor import ClaudeExecutor, AgentCoordinator, TaskStatus
 from base_agent import BaseAgentBot
 from mission_manager import MissionManager, set_mission_manager, get_mission_manager
+from discord_embeds import RALPHEmbeds
+from collaboration_logger import get_collaboration_logger, EventType
 from agents import (
     TuningAgent,
     BacktestAgent,
@@ -132,6 +134,14 @@ class AutonomousOrchestrator:
         context = handoff["context"]
 
         logger.info(f"Dispatching handoff: {from_type} → {target_type}")
+        collab_logger = get_collaboration_logger()
+
+        # Log the handoff
+        collab_logger.agent_handoff(
+            from_agent=from_type,
+            to_agent=target_type,
+            task_description=task[:200]
+        )
 
         target_agent = self.agents.get(target_type)
         if not target_agent:
@@ -149,17 +159,54 @@ class AutonomousOrchestrator:
             "status": "running"
         }
 
+        # Post handoff embed
+        handoff_embed = RALPHEmbeds.handoff(
+            from_agent=from_type,
+            to_agent=target_type,
+            task_description=task[:500]
+        )
+        await target_agent.post_embed_to_team(handoff_embed)
+
+        # Post working embed
+        working_embed = RALPHEmbeds.agent_working(
+            agent_type=target_type,
+            task_description=task[:500],
+            task_id=workflow_id
+        )
+        await target_agent.post_embed_to_team(working_embed)
+
         try:
             # Execute the task via the target agent
             result = await target_agent.execute_task(
                 task=task,
                 context=context,
-                notify_channel=True
+                notify_channel=True,
+                force_claude=True  # Handoffs go to Claude Code
             )
 
             # Update workflow status
             self.active_workflows[workflow_id]["status"] = result.status.value
             self.active_workflows[workflow_id]["completed"] = datetime.utcnow().isoformat()
+
+            # Post result embed
+            if result.status == TaskStatus.COMPLETED:
+                summary = result.output[:500] if result.output else "Task completed successfully"
+                complete_embed = RALPHEmbeds.agent_complete(
+                    agent_type=target_type,
+                    task_description=task[:200],
+                    result_summary=summary,
+                    duration_seconds=result.duration_seconds,
+                    task_id=workflow_id
+                )
+                await target_agent.post_embed_to_team(complete_embed)
+            else:
+                error_embed = RALPHEmbeds.agent_error(
+                    agent_type=target_type,
+                    task_description=task[:200],
+                    error_message=result.error or "Unknown error",
+                    task_id=workflow_id
+                )
+                await target_agent.post_embed_to_team(error_embed)
 
             # Check if this triggers further handoffs
             await self._check_auto_handoffs(target_type, result)
@@ -169,87 +216,200 @@ class AutonomousOrchestrator:
             self.active_workflows[workflow_id]["status"] = "failed"
             self.active_workflows[workflow_id]["error"] = str(e)
 
+            # Log the error
+            collab_logger.error(
+                agent=target_type,
+                error=str(e)[:200],
+                context=f"Handoff from {from_type}: {task[:100]}"
+            )
+
+            # Post error embed
+            error_embed = RALPHEmbeds.agent_error(
+                agent_type=target_type,
+                task_description=task[:200],
+                error_message=str(e)[:300],
+                task_id=workflow_id
+            )
+            await target_agent.post_embed_to_team(error_embed)
+
     async def _check_auto_handoffs(self, agent_type: str, result):
         """
         Check if the completed task should trigger automatic handoffs.
 
-        This implements the autonomous workflow progression based on
-        the handoff rules defined in agent_prompts.py
+        Parses output for:
+        1. [TASK: agent_type] format - adds to mission and queues handoffs
+        2. [HANDOFF: agent_type] format - queues direct handoffs
+        3. Keyword-based triggers from HANDOFF_RULES
         """
+        import re
         from agent_prompts import HANDOFF_RULES
 
+        if result.status != TaskStatus.COMPLETED or not result.output:
+            return
+
+        output = result.output
+        output_lower = output.lower()
+
+        # ============================================================
+        # Parse [TASK: agent_type] format and add to mission
+        # ============================================================
+        task_pattern = r'\[TASK:\s*(\w+)\]\s*(.+?)(?=\[TASK:|$)'
+        task_matches = re.findall(task_pattern, output, re.IGNORECASE | re.DOTALL)
+
+        if task_matches:
+            logger.info(f"Found {len(task_matches)} tasks in output")
+            collab_logger = get_collaboration_logger()
+
+            # Get the strategy agent to post updates
+            strategy_agent = self.agents.get("strategy")
+
+            # Get current mission
+            mission = self.mission_manager.current_mission
+
+            if mission and strategy_agent:
+                # Build task list for embed
+                tasks_for_embed = []
+
+                for agent_type_task, task_desc in task_matches:
+                    agent_type_task = agent_type_task.lower().strip()
+                    task_desc = task_desc.strip()[:500]  # Limit task length
+
+                    if agent_type_task in ["tuning", "backtest", "risk", "data", "strategy"]:
+                        tasks_for_embed.append({
+                            "agent": agent_type_task,
+                            "task": task_desc
+                        })
+
+                        # Add task to mission
+                        task = await self.mission_manager.add_task_to_mission(
+                            description=task_desc,
+                            assigned_to=agent_type_task,
+                            priority="medium"
+                        )
+
+                        if task:
+                            logger.info(f"Added mission task: {task.task_id} -> {agent_type_task}")
+
+                            # Log task creation
+                            collab_logger.task_created(
+                                task_id=task.task_id,
+                                agent=agent_type_task,
+                                description=task_desc[:200]
+                            )
+
+                            # Queue handoff to execute immediately
+                            await self.coordinator.queue_handoff(
+                                from_agent="strategy",
+                                to_agent=agent_type_task,
+                                task=task_desc,
+                                context=f"Mission: {mission.mission_id}\nTask: {task.task_id}\nObjective: {mission.objective}"
+                            )
+
+                # Post task breakdown embed
+                if tasks_for_embed:
+                    task_embed = RALPHEmbeds.task_breakdown(
+                        tasks=tasks_for_embed,
+                        mission_objective=mission.objective
+                    )
+                    await strategy_agent.post_embed_to_team(task_embed)
+
+                    # Post detailed task embeds per agent
+                    detailed_embeds = RALPHEmbeds.task_list_detailed(tasks_for_embed)
+                    for embed in detailed_embeds[:5]:  # Limit to 5 to avoid spam
+                        await strategy_agent.post_embed_to_team(embed)
+                        await asyncio.sleep(0.3)
+
+                # Start the mission
+                await self.mission_manager.start_mission()
+
+                # Post progress embed
+                progress_embed = RALPHEmbeds.mission_progress(
+                    completed=0,
+                    total=len(tasks_for_embed),
+                    current_agent="strategy",
+                    current_task="Delegating tasks to agents"
+                )
+                await strategy_agent.post_embed_to_team(progress_embed)
+
+            return  # Tasks were parsed, skip other checks
+
+        # ============================================================
+        # Parse [HANDOFF: agent_type] format for direct handoffs
+        # ============================================================
+        handoff_pattern = r'\[HANDOFF:\s*(\w+)\]\s*(.+?)(?=\[HANDOFF:|$)'
+        handoff_matches = re.findall(handoff_pattern, output, re.IGNORECASE | re.DOTALL)
+
+        for target_agent, task in handoff_matches:
+            target_agent = target_agent.lower().strip()
+            task = task.strip()
+
+            if target_agent in ["tuning", "backtest", "risk", "strategy", "data"]:
+                logger.info(f"Parsed handoff to {target_agent}: {task[:50]}...")
+                await self.coordinator.queue_handoff(
+                    from_agent=agent_type,
+                    to_agent=target_agent,
+                    task=task,
+                    context=result.output[:1000]
+                )
+
+        # ============================================================
+        # Keyword-based triggers from HANDOFF_RULES
+        # ============================================================
         rules = HANDOFF_RULES.get(agent_type, {})
 
-        # Determine which trigger applies based on result
-        if result.status == TaskStatus.COMPLETED:
-            # Check output for keywords to determine next action
-            output_lower = result.output.lower()
+        # Strategy agent completed with proposal
+        if agent_type == "strategy" and "proposal" in output_lower:
+            targets = rules.get("on_proposal", [])
+            for target in targets:
+                await self.coordinator.queue_handoff(
+                    from_agent=agent_type,
+                    to_agent=target,
+                    task="Prepare features for the proposed strategy",
+                    context=result.output[:1000]
+                )
 
-            # Strategy agent completed → trigger data prep
-            if agent_type == "strategy" and "proposal" in output_lower:
-                targets = rules.get("on_proposal", [])
+        # Backtest completed → always audit
+        elif agent_type == "backtest":
+            targets = rules.get("on_complete", [])
+            for target in targets:
+                await self.coordinator.queue_handoff(
+                    from_agent=agent_type,
+                    to_agent=target,
+                    task="Audit the backtest results",
+                    context=result.output[:1000]
+                )
+
+        # Risk audit completed
+        elif agent_type == "risk":
+            if "approved" in output_lower:
+                targets = rules.get("on_approved", [])
                 for target in targets:
                     await self.coordinator.queue_handoff(
                         from_agent=agent_type,
                         to_agent=target,
-                        task="Prepare features for the proposed strategy",
+                        task="Strategy approved - proceed with implementation",
                         context=result.output[:1000]
                     )
-
-            # Data agent completed → notify backtest
-            elif agent_type == "data" and "features ready" in output_lower:
-                targets = rules.get("on_features_ready", [])
-                for target in targets:
-                    if target != "*":
-                        await self.coordinator.queue_handoff(
-                            from_agent=agent_type,
-                            to_agent=target,
-                            task="Features are ready for use",
-                            context=result.output[:1000]
-                        )
-
-            # Backtest completed → always audit
-            elif agent_type == "backtest":
-                targets = rules.get("on_complete", [])
+            elif "rejected" in output_lower:
+                targets = rules.get("on_rejected", [])
                 for target in targets:
                     await self.coordinator.queue_handoff(
                         from_agent=agent_type,
                         to_agent=target,
-                        task="Audit the backtest results",
+                        task="Strategy rejected - review and fix issues",
                         context=result.output[:1000]
                     )
 
-            # Risk audit completed
-            elif agent_type == "risk":
-                if "approved" in output_lower:
-                    targets = rules.get("on_approved", [])
-                    for target in targets:
-                        await self.coordinator.queue_handoff(
-                            from_agent=agent_type,
-                            to_agent=target,
-                            task="Strategy approved - proceed with implementation",
-                            context=result.output[:1000]
-                        )
-                elif "rejected" in output_lower:
-                    targets = rules.get("on_rejected", [])
-                    for target in targets:
-                        await self.coordinator.queue_handoff(
-                            from_agent=agent_type,
-                            to_agent=target,
-                            task="Strategy rejected - review and fix issues",
-                            context=result.output[:1000]
-                        )
-
-            # Tuning completed → validate
-            elif agent_type == "tuning":
-                targets = rules.get("on_proposal", [])
-                for target in targets:
-                    await self.coordinator.queue_handoff(
-                        from_agent=agent_type,
-                        to_agent=target,
-                        task="Validate the proposed parameter changes",
-                        context=result.output[:1000]
-                    )
+        # Tuning completed → validate
+        elif agent_type == "tuning":
+            targets = rules.get("on_proposal", [])
+            for target in targets:
+                await self.coordinator.queue_handoff(
+                    from_agent=agent_type,
+                    to_agent=target,
+                    task="Validate the proposed parameter changes",
+                    context=result.output[:1000]
+                )
 
     async def kickoff_workflow(
         self,
@@ -277,6 +437,14 @@ class AutonomousOrchestrator:
             "started": datetime.utcnow().isoformat(),
             "status": "running"
         }
+
+        # Log workflow start
+        collab_logger = get_collaboration_logger()
+        collab_logger.mission_start(
+            mission_id=workflow_id,
+            objective=task[:200],
+            initiated_by="user"
+        )
 
         # Queue the initial task
         await self.coordinator.queue_handoff(

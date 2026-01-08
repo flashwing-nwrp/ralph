@@ -49,8 +49,14 @@ from bot_communication import (
 # Tiered LLM Orchestration (cost optimization)
 from orchestration_layer import (
     get_orchestration_layer, OrchestrationLayer, TaskComplexity,
-    OrchestrationResult
+    OrchestrationResult, ConversationalMissionManager
 )
+
+# Professional Discord embeds
+from discord_embeds import RALPHEmbeds, get_agent_emoji, get_agent_color
+
+# Collaboration logging for post-hoc analysis
+from collaboration_logger import get_collaboration_logger, EventType
 
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
@@ -239,11 +245,19 @@ class BaseAgentBot(ABC):
 
             self.logger.info(f"Registered with bot registry: {self.agent_type} (ID: {self.bot.user.id})")
 
-            # Post ready message to bot-logs channel
-            await self._post_to_channel("bot-logs", f"**{self.agent_name}** is online and ready!")
+            # Post ready message to bot_logs channel
+            await self._post_to_channel("bot_logs", f"**{self.agent_name}** is online and ready!")
 
             # Call agent-specific on_ready
             await self.on_agent_ready()
+
+            # Check for mission to resume (only Strategy Agent posts to avoid duplicates)
+            if self.agent_type == "strategy":
+                await self._check_mission_to_resume()
+
+            # Start background mission task processor for autonomous operation
+            # Note: Handoffs are processed by AutonomousOrchestrator
+            self.bot.loop.create_task(self._mission_task_processor())
 
         @self.bot.event
         async def on_disconnect():
@@ -260,7 +274,7 @@ class BaseAgentBot(ABC):
             """Global error handler for events."""
             self.logger.exception(f"Error in event {event}")
             await self._post_to_channel(
-                "error-logs",
+                "error_logs",
                 f"**{self.agent_name}** error in `{event}`: Check logs for details"
             )
 
@@ -300,7 +314,7 @@ class BaseAgentBot(ABC):
             elif channel_name == self.primary_channel_name or self.primary_channel_name in channel_name:
                 should_process_commands = True
 
-            # Other channels (bot-logs, error-logs, etc): No command processing
+            # Other channels (bot_logs, error_logs, etc): No command processing
             # but @mentions still work
 
             # Process commands only if this bot should handle this channel
@@ -856,12 +870,116 @@ class BaseAgentBot(ABC):
             else:
                 await ctx.reply(f"Restart failed: {message}")
 
+        @self.bot.command(name="ralph")
+        async def ralph_status(ctx: commands.Context):
+            """Show RALPH system status with beautiful embed."""
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            # List all agent types
+            all_agents = ["strategy", "tuning", "backtest", "risk", "data"]
+
+            # Get active missions count
+            manager = get_mission_manager()
+            active_missions = 1 if manager.current_mission else 0
+
+            # Create status embed
+            status_embed = RALPHEmbeds.system_status(
+                agents_online=all_agents,  # Assume all online when any responds
+                agents_offline=[],
+                active_missions=active_missions
+            )
+
+            await ctx.reply(embed=status_embed)
+
+        @self.bot.command(name="collab")
+        async def collab_summary(ctx: commands.Context):
+            """Show collaboration logging summary (!collab)."""
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            collab_logger = get_collaboration_logger()
+            summary = collab_logger.get_session_summary()
+
+            # Create embed for log summary
+            embed = discord.Embed(
+                title="📊 Collaboration Log Summary",
+                color=0xFFD700,  # Gold
+                description="Session statistics and analysis"
+            )
+
+            embed.add_field(
+                name="⏱️ Session Duration",
+                value=f"{summary.get('session_duration_seconds', 0):.1f}s",
+                inline=True
+            )
+            embed.add_field(
+                name="📝 Total Events",
+                value=str(summary.get('total_events', 0)),
+                inline=True
+            )
+            embed.add_field(
+                name="🎯 Missions",
+                value=str(summary.get('missions', 0)),
+                inline=True
+            )
+
+            embed.add_field(
+                name="✅ Tasks Completed",
+                value=str(summary.get('tasks_completed', 0)),
+                inline=True
+            )
+            embed.add_field(
+                name="❌ Tasks Failed",
+                value=str(summary.get('tasks_failed', 0)),
+                inline=True
+            )
+            embed.add_field(
+                name="🔄 Handoffs",
+                value=str(summary.get('handoffs', 0)),
+                inline=True
+            )
+
+            embed.add_field(
+                name="🤖 Claude Executions",
+                value=str(summary.get('claude_executions', 0)),
+                inline=True
+            )
+            embed.add_field(
+                name="⚠️ Errors",
+                value=str(summary.get('errors', 0)),
+                inline=True
+            )
+            embed.add_field(
+                name="⏳ Avg Task Duration",
+                value=f"{summary.get('avg_task_duration', 0):.1f}s",
+                inline=True
+            )
+
+            # Add log file paths
+            log_files = summary.get('log_files', {})
+            if log_files:
+                embed.add_field(
+                    name="📁 Log Files",
+                    value=f"JSONL: `{log_files.get('jsonl', 'N/A')}`\nTXT: `{log_files.get('txt', 'N/A')}`",
+                    inline=False
+                )
+
+            embed.set_footer(text="Use log files for detailed post-hoc analysis")
+            await ctx.reply(embed=embed)
+
     def _register_mission_commands(self):
         """Register commands for mission/goal management."""
 
         @self.bot.command(name="mission")
         async def mission(ctx: commands.Context, *, objective: str = None):
             """Set a new mission/goal for the agent ensemble (owner only)."""
+            # Only Strategy Agent handles mission commands to avoid duplicates
+            if self.agent_type != "strategy":
+                return  # Silently ignore - Strategy Agent will handle it
+
             if not self._is_owner(ctx.author.id):
                 await ctx.reply("Only the operator can set missions.")
                 return
@@ -880,54 +998,131 @@ class BaseAgentBot(ABC):
                 created_by=str(ctx.author)
             )
 
-            # Acknowledge creation
-            embed = discord.Embed(
-                title=f"Mission Created: {mission.mission_id}",
-                description=objective,
-                color=discord.Color.gold(),
-                timestamp=datetime.utcnow()
+            # Send beautiful mission start embed
+            start_embed = RALPHEmbeds.mission_start(
+                mission_objective=objective,
+                initiated_by=str(ctx.author)
             )
-            embed.add_field(
-                name="Status",
-                value="Routing to **Strategy Agent** for planning...",
-                inline=False
-            )
-            embed.set_footer(text="Use !mission to check progress")
-            await ctx.reply(embed=embed)
+            await ctx.reply(embed=start_embed)
 
-            # Notify the team
-            await self.post_to_team_channel(
-                f"**NEW MISSION** from {ctx.author.mention}\n\n"
-                f"**{mission.mission_id}**: {objective}\n\n"
-                f"**@Strategy Agent** - Please break down this mission into actionable tasks."
-            )
+            # Notify the team with embed
+            await self.post_embed_to_team(start_embed)
 
-            # Trigger Strategy Agent to plan the mission
-            if self._coordinator:
-                await self._coordinator.queue_handoff(
-                    from_agent="operator",
-                    to_agent="strategy",
-                    task=f"""NEW MISSION: {objective}
+            # Use ConversationalMissionManager to drive the planning
+            project_dir = os.getenv("RALPH_PROJECT_DIR", "E:\\Polymarket AI Bot")
+            mission_start_time = datetime.utcnow()
 
-You are receiving a new mission from the operator. Your job is to:
+            # Track files discovered and tasks
+            discovered_files = []
+            tasks_found = []
 
-1. Analyze the mission objective
-2. Break it down into specific, actionable tasks
-3. Assign each task to the appropriate agent:
-   - tuning: Parameter optimization, hyperparameter search
-   - backtest: Simulation, validation, performance testing
-   - risk: Safety audits, risk assessment, compliance
-   - data: Data preprocessing, feature engineering, data quality
-   - strategy: Strategy logic, signal generation (yourself)
+            # Create callback to post updates to Discord with embeds
+            async def post_update(message: str):
+                nonlocal discovered_files
 
-4. Identify dependencies between tasks (what must complete before what)
-5. Post a mission plan to #ralph_team
+                # Parse the message to determine what embed to show
+                if "Found" in message and "relevant files" in message:
+                    # Extract file names
+                    lines = message.split("\n")
+                    files = [l.strip("- ").strip() for l in lines if l.startswith("- ")]
+                    discovered_files = files
 
-After planning, begin executing by handing off tasks to the appropriate agents.
+                    embed = RALPHEmbeds.file_discovery(files)
+                    await self.post_embed_to_team(embed)
+                elif "Manager Turn" in message:
+                    # Show thinking embed
+                    embed = RALPHEmbeds.thinking("strategy", "Analyzing codebase and planning tasks...")
+                    await self.post_embed_to_team(embed)
+                elif "Claude Response" in message:
+                    # Don't post full response - will show task summary instead
+                    pass
+                elif "Mission Planning Complete" in message:
+                    # Will be handled after result processing
+                    pass
+                else:
+                    # Fallback to text for other messages
+                    await self.post_to_team_channel(message)
 
-Respond with your mission breakdown and begin autonomous execution.""",
-                    context=f"Mission ID: {mission.mission_id}\nCreated by: {ctx.author}\nObjective: {objective}"
+            # Use the orchestration layer to drive the conversation
+            orch_layer = get_orchestration_layer()
+            mission_mgr = ConversationalMissionManager(orch_layer)
+
+            try:
+                result = await mission_mgr.drive_mission(
+                    mission_objective=objective,
+                    project_dir=project_dir,
+                    claude_executor=self._executor,
+                    post_update=post_update
                 )
+
+                # Process the tasks found
+                if result["tasks"]:
+                    tasks_found = result["tasks"]
+
+                    # Create beautiful task breakdown embed
+                    task_embed = RALPHEmbeds.task_breakdown(
+                        tasks=tasks_found,
+                        mission_objective=objective
+                    )
+                    await self.post_embed_to_team(task_embed)
+
+                    # Create detailed task embeds per agent
+                    detailed_embeds = RALPHEmbeds.task_list_detailed(tasks_found)
+                    for embed in detailed_embeds:
+                        await self.post_embed_to_team(embed)
+                        await asyncio.sleep(0.3)
+
+                    # Add tasks to mission manager and queue handoffs
+                    for task_info in tasks_found:
+                        agent_type = task_info["agent"]
+                        task_desc = task_info["task"]
+
+                        # Add to mission manager
+                        mission_task = await manager.add_task_to_mission(
+                            description=task_desc,
+                            assigned_to=agent_type
+                        )
+
+                        # Queue handoff to execute the task
+                        if self._coordinator:
+                            await self._coordinator.queue_handoff(
+                                from_agent="strategy",
+                                to_agent=agent_type,
+                                task=task_desc,
+                                context=f"Mission: {mission.mission_id}\nObjective: {objective}"
+                            )
+
+                    # Start the mission
+                    await manager.start_mission()
+
+                    # Post progress embed
+                    progress_embed = RALPHEmbeds.mission_progress(
+                        completed=0,
+                        total=len(tasks_found),
+                        current_agent="strategy",
+                        current_task="Delegating tasks to agents"
+                    )
+                    await self.post_embed_to_team(progress_embed)
+
+                else:
+                    # Mission planning failed
+                    fail_embed = RALPHEmbeds.mission_failed(
+                        mission_objective=objective,
+                        error_message=f"Could not extract tasks after {result['turns_used']} turns. Try a more specific objective.",
+                        completed_tasks=0,
+                        total_tasks=0
+                    )
+                    await self.post_embed_to_team(fail_embed)
+
+            except Exception as e:
+                self.logger.exception(f"Error in mission planning: {e}")
+                error_embed = RALPHEmbeds.mission_failed(
+                    mission_objective=objective,
+                    error_message=str(e),
+                    completed_tasks=0,
+                    total_tasks=0
+                )
+                await self.post_embed_to_team(error_embed)
 
         @self.bot.command(name="mission_status")
         async def mission_status(ctx: commands.Context):
@@ -2442,6 +2637,15 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             TaskResult with output and status
         """
         task_id = f"{self.agent_type[:3].upper()}-{datetime.utcnow().strftime('%H%M%S')}"
+        start_time = datetime.utcnow()
+        collab_logger = get_collaboration_logger()
+
+        # Log task start
+        collab_logger.task_started(
+            task_id=task_id,
+            agent=self.agent_type,
+            description=task[:200]
+        )
 
         # Get context from coordinator if available
         if not context and self._coordinator:
@@ -2467,6 +2671,15 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 # If orchestrator handled it, return immediately (saves Claude tokens!)
                 if orch_result.handled:
                     self.logger.info(f"Task handled by orchestrator (saved Claude tokens)")
+                    duration = (datetime.utcnow() - start_time).total_seconds()
+
+                    # Log task completion (orchestrated)
+                    collab_logger.task_completed(
+                        task_id=task_id,
+                        agent=self.agent_type,
+                        duration_seconds=duration,
+                        summary=f"Orchestrated: {(orch_result.response or '')[:200]}"
+                    )
 
                     if notify_channel and orch_result.response:
                         await self.post_to_primary_channel(
@@ -2478,7 +2691,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                         status=TaskStatus.COMPLETED,
                         output=orch_result.response or "Task handled by orchestrator",
                         error=None,
-                        duration_seconds=0.0
+                        duration_seconds=duration
                     )
 
                 # Use summarized context if provided (reduces Claude tokens)
@@ -2502,6 +2715,14 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
 
         self.running_tasks[task_id] = task[:100]
 
+        # Log Claude execution start
+        collab_logger.claude_execution(
+            agent=self.agent_type,
+            prompt_preview=task[:300],
+            prompt_length=len(task),
+            task_id=task_id
+        )
+
         if notify_channel:
             await self.post_to_primary_channel(
                 f"Starting task `{task_id}` (Claude Code):\n```\n{task[:300]}\n```"
@@ -2515,6 +2736,15 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             context=context
         )
 
+        # Log Claude response
+        collab_logger.claude_response(
+            agent=self.agent_type,
+            response_preview=result.output[:300] if result.output else "",
+            response_length=len(result.output) if result.output else 0,
+            duration_seconds=result.duration_seconds,
+            task_id=task_id
+        )
+
         # Update tracking
         del self.running_tasks[task_id]
         self.completed_tasks.append({
@@ -2522,6 +2752,21 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             "status": result.status.value,
             "duration": result.duration_seconds
         })
+
+        # Log task completion/failure
+        if result.status == TaskStatus.COMPLETED:
+            collab_logger.task_completed(
+                task_id=task_id,
+                agent=self.agent_type,
+                duration_seconds=result.duration_seconds,
+                summary=result.output[:500] if result.output else "Completed"
+            )
+        else:
+            collab_logger.task_failed(
+                task_id=task_id,
+                agent=self.agent_type,
+                error=result.error or f"Status: {result.status.value}"
+            )
 
         # Store output for other agents
         if self._coordinator and result.status == TaskStatus.COMPLETED:
@@ -2552,20 +2797,179 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                 f"*Auto-handoff*: {task[:200]}"
             )
 
+    async def _mission_task_processor(self):
+        """
+        Background task that processes mission tasks assigned to this agent.
+
+        Note: Inter-agent handoffs are processed by AutonomousOrchestrator.
+        This processor only handles mission tasks from the mission manager.
+        """
+        self.logger.info(f"Mission task processor started for {self.agent_name}")
+
+        while True:
+            try:
+                await asyncio.sleep(3)  # Check every 3 seconds
+
+                # Check if there's an active mission with pending tasks for this agent
+                mission_manager = get_mission_manager()
+                if not mission_manager.current_mission:
+                    continue
+
+                mission = mission_manager.current_mission
+
+                # Check if mission is active
+                if mission.status in [MissionStatus.PAUSED, MissionStatus.COMPLETED, MissionStatus.FAILED]:
+                    continue
+
+                # Get next task for this agent
+                next_task = mission.get_next_task(self.agent_type)
+                if not next_task:
+                    continue
+
+                self.logger.info(f"Processing mission task: {next_task.task_id}")
+
+                # Mark task as in progress
+                await mission_manager.update_task_status(next_task.task_id, "in_progress")
+
+                # Notify team
+                await self.post_to_team_channel(
+                    f"**{self.agent_name}** starting task `{next_task.task_id}`:\n"
+                    f"```{next_task.description[:300]}```"
+                )
+
+                # Execute the task
+                result = await self.execute_task(
+                    task=next_task.description,
+                    context=f"Mission: {mission.mission_id}\nObjective: {mission.objective}",
+                    notify_channel=True,
+                    force_claude=True  # Mission tasks go to Claude Code
+                )
+
+                # Update task status based on result
+                if result.status == TaskStatus.COMPLETED:
+                    await mission_manager.complete_task(next_task.task_id, result.output[:1000])
+
+                    # Post completion summary to team
+                    await self.post_to_team_channel(
+                        f"**{self.agent_name}** completed `{next_task.task_id}`\n"
+                        f"**Output summary:**\n{result.output[:500]}"
+                    )
+
+                    # Check if mission is now complete
+                    progress = mission.get_progress()
+                    if progress['completed'] == progress['total']:
+                        await self.post_to_team_channel(
+                            f"**MISSION COMPLETE!** {mission.mission_id}\n\n"
+                            f"All {progress['total']} tasks completed successfully.\n"
+                            f"**Objective:** {mission.objective}"
+                        )
+                else:
+                    await mission_manager.update_task_status(next_task.task_id, "failed")
+                    await self.post_to_team_channel(
+                        f"**{self.agent_name}** failed task `{next_task.task_id}`:\n"
+                        f"Error: {result.error or 'Unknown error'}"
+                    )
+
+            except asyncio.CancelledError:
+                self.logger.info("Mission task processor cancelled")
+                break
+            except Exception as e:
+                self.logger.exception(f"Error in mission task processor: {e}")
+                await asyncio.sleep(5)  # Wait longer on error
+
+    async def _parse_and_queue_handoffs(self, output: str):
+        """
+        Parse Claude Code output for agent handoff requests.
+
+        Claude may output things like:
+        - "@Backtest Agent please validate..."
+        - "Handing off to Risk Agent for safety audit"
+        - "[HANDOFF: tuning] Optimize the learning rate"
+        """
+        if not self._coordinator or not output:
+            return
+
+        # Look for explicit handoff patterns
+        import re
+
+        # Pattern: [HANDOFF: agent_type] task description
+        handoff_pattern = r'\[HANDOFF:\s*(\w+)\]\s*(.+?)(?=\[HANDOFF:|$)'
+        matches = re.findall(handoff_pattern, output, re.IGNORECASE | re.DOTALL)
+
+        for agent_type, task in matches:
+            agent_type = agent_type.lower().strip()
+            task = task.strip()
+
+            if agent_type in ["tuning", "backtest", "risk", "strategy", "data"]:
+                self.logger.info(f"Parsed handoff to {agent_type}: {task[:50]}...")
+                await self.trigger_handoff(agent_type, task)
+
     async def _post_to_channel(self, channel_name: str, content: str) -> Optional[discord.Message]:
-        """Post a message to a specific channel by name."""
+        """Post a message to a specific channel by name or ID fallback."""
         guild = self.bot.get_guild(self.guild_id)
         if not guild:
             self.logger.warning(f"Guild {self.guild_id} not found")
             return None
 
+        # Channel name to env var mapping for ID fallback
+        channel_id_map = {
+            "ralph_team": "CHANNEL_RALPH_TEAM",
+            "tuning": "CHANNEL_TUNING",
+            "backtesting": "CHANNEL_BACKTESTING",
+            "risk": "CHANNEL_RISK",
+            "strategy": "CHANNEL_STRATEGY",
+            "data": "CHANNEL_DATA",
+            "bot_logs": "CHANNEL_BOT_LOGS",
+            "error_logs": "CHANNEL_ERROR_LOGS",
+        }
+
+        # First try by name
         channel = discord.utils.get(guild.text_channels, name=channel_name)
+
+        # If not found by name, try by ID from environment variable
+        if not channel and channel_name in channel_id_map:
+            channel_id_str = os.getenv(channel_id_map[channel_name])
+            if channel_id_str:
+                try:
+                    channel_id = int(channel_id_str)
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        self.logger.debug(f"Found channel by ID fallback: {channel_name} -> {channel_id}")
+                except (ValueError, TypeError):
+                    pass
+
         if not channel:
-            self.logger.warning(f"Channel #{channel_name} not found")
+            self.logger.warning(f"Channel #{channel_name} not found (neither by name nor ID)")
             return None
 
         try:
-            return await channel.send(content)
+            # Handle long messages by splitting into chunks
+            if len(content) > 1900:
+                # Split into multiple messages
+                chunks = []
+                remaining = content
+                while len(remaining) > 1900:
+                    # Find a good break point (newline or space)
+                    break_point = remaining[:1900].rfind('\n')
+                    if break_point < 1000:
+                        break_point = remaining[:1900].rfind(' ')
+                    if break_point < 1000:
+                        break_point = 1900
+
+                    chunks.append(remaining[:break_point])
+                    remaining = remaining[break_point:].lstrip()
+
+                if remaining:
+                    chunks.append(remaining)
+
+                # Send all chunks
+                last_msg = None
+                for chunk in chunks:
+                    last_msg = await channel.send(chunk)
+                    await asyncio.sleep(0.5)  # Brief delay between chunks
+                return last_msg
+            else:
+                return await channel.send(content)
         except discord.HTTPException as e:
             self.logger.error(f"Failed to send message to #{channel_name}: {e}")
             return None
@@ -2577,6 +2981,145 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
     async def post_to_team_channel(self, content: str) -> Optional[discord.Message]:
         """Post a message to the #ralph_team channel."""
         return await self._post_to_channel("ralph_team", content)
+
+    async def _check_mission_to_resume(self):
+        """
+        Check if there's a mission to resume on startup.
+        Posts a notification to the team channel if a mission is in progress.
+        """
+        try:
+            manager = get_mission_manager()
+            mission = manager.current_mission
+
+            if not mission:
+                return
+
+            # Count pending tasks
+            pending_tasks = [t for t in mission.tasks if t.status == "pending"]
+            completed_tasks = [t for t in mission.tasks if t.status == "completed"]
+
+            if mission.status in [MissionStatus.IN_PROGRESS, MissionStatus.PLANNING]:
+                # Create a resume notification embed
+                embed = discord.Embed(
+                    title="🔄 Mission Resumed",
+                    description=f"**{mission.mission_id}**: {mission.objective[:200]}",
+                    color=0x3498DB  # Blue
+                )
+                embed.add_field(
+                    name="Progress",
+                    value=f"✅ {len(completed_tasks)}/{len(mission.tasks)} tasks completed",
+                    inline=True
+                )
+                embed.add_field(
+                    name="Pending",
+                    value=f"⏳ {len(pending_tasks)} tasks remaining",
+                    inline=True
+                )
+
+                # Show which agents have pending work
+                agent_tasks = {}
+                for task in pending_tasks:
+                    agent = task.assigned_to
+                    if agent not in agent_tasks:
+                        agent_tasks[agent] = 0
+                    agent_tasks[agent] += 1
+
+                if agent_tasks:
+                    task_summary = "\n".join([f"• **{a.title()}**: {c} task(s)" for a, c in agent_tasks.items()])
+                    embed.add_field(
+                        name="Agent Workload",
+                        value=task_summary,
+                        inline=False
+                    )
+
+                embed.set_footer(text="Agents will automatically pick up pending tasks")
+
+                await self.post_embed_to_team(embed)
+                self.logger.info(f"Mission resume notification posted: {mission.mission_id}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to check mission to resume: {e}")
+
+    async def _post_embed_to_channel(
+        self,
+        channel_name: str,
+        embed: discord.Embed
+    ) -> Optional[discord.Message]:
+        """Post an embed to a specific channel."""
+        guild = self.bot.get_guild(self.guild_id)
+        if not guild:
+            self.logger.warning(f"Guild {self.guild_id} not found")
+            return None
+
+        # Channel name to env var mapping for ID fallback
+        channel_id_map = {
+            "ralph_team": "CHANNEL_RALPH_TEAM",
+            "tuning": "CHANNEL_TUNING",
+            "backtesting": "CHANNEL_BACKTESTING",
+            "risk": "CHANNEL_RISK",
+            "strategy": "CHANNEL_STRATEGY",
+            "data": "CHANNEL_DATA",
+            "bot_logs": "CHANNEL_BOT_LOGS",
+            "error_logs": "CHANNEL_ERROR_LOGS",
+        }
+
+        # First try by name
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+
+        # If not found by name, try by ID from environment variable
+        if not channel and channel_name in channel_id_map:
+            channel_id_str = os.getenv(channel_id_map[channel_name])
+            if channel_id_str:
+                try:
+                    channel_id = int(channel_id_str)
+                    channel = guild.get_channel(channel_id)
+                except (ValueError, TypeError):
+                    pass
+
+        if not channel:
+            self.logger.warning(f"Channel #{channel_name} not found for embed")
+            return None
+
+        try:
+            return await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to send embed to #{channel_name}: {e}")
+            return None
+
+    async def post_embed_to_team(self, embed: discord.Embed) -> Optional[discord.Message]:
+        """Post an embed to the #ralph_team channel."""
+        return await self._post_embed_to_channel("ralph_team", embed)
+
+    async def post_embeds_to_team(self, embeds: list) -> Optional[discord.Message]:
+        """Post multiple embeds to the #ralph_team channel."""
+        guild = self.bot.get_guild(self.guild_id)
+        if not guild:
+            return None
+
+        channel_id_str = os.getenv("CHANNEL_RALPH_TEAM")
+        if not channel_id_str:
+            channel = discord.utils.get(guild.text_channels, name="ralph_team")
+        else:
+            try:
+                channel = guild.get_channel(int(channel_id_str))
+            except (ValueError, TypeError):
+                channel = None
+
+        if not channel:
+            return None
+
+        try:
+            # Discord allows up to 10 embeds per message
+            last_msg = None
+            for i in range(0, len(embeds), 10):
+                batch = embeds[i:i+10]
+                last_msg = await channel.send(embeds=batch)
+                if i + 10 < len(embeds):
+                    await asyncio.sleep(0.5)
+            return last_msg
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to send embeds: {e}")
+            return None
 
     async def mention_agent(self, agent_role_name: str, message: str):
         """
@@ -2649,7 +3192,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
     async def shutdown(self):
         """Gracefully shutdown the bot."""
         self.logger.info("Shutting down...")
-        await self._post_to_channel("bot-logs", f"**{self.agent_name}** is going offline.")
+        await self._post_to_channel("bot_logs", f"**{self.agent_name}** is going offline.")
         await self.bot.close()
 
     # ==========================================

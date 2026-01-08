@@ -739,6 +739,268 @@ Provide a 200-word summary preserving critical information:"""
 
 
 # =============================================================================
+# CONVERSATIONAL MISSION MANAGER
+# =============================================================================
+
+class ConversationalMissionManager:
+    """
+    Uses GPT-4o-mini to drive multi-turn conversations with Claude Code.
+
+    This solves the problem that Claude Code with --print only gives one response.
+    GPT-4o-mini acts as the "manager" that:
+    1. Analyzes the mission
+    2. Creates prompts for Claude Code
+    3. Evaluates Claude's response
+    4. Decides on follow-up prompts
+    5. Continues until task is complete
+    """
+
+    def __init__(self, orchestration_layer: "OrchestrationLayer"):
+        self.orch = orchestration_layer
+        self.conversation_history: List[Dict[str, str]] = []
+        self.max_turns = 10  # Prevent infinite loops
+
+    async def drive_mission(
+        self,
+        mission_objective: str,
+        project_dir: str,
+        claude_executor,  # ClaudeExecutor instance
+        post_update: Callable[[str], Any] = None  # Callback to post Discord updates
+    ) -> Dict[str, Any]:
+        """
+        Drive a mission to completion using GPT as manager, Claude as worker.
+
+        Since Claude Code --print mode doesn't reliably use tools, we:
+        1. Explore the codebase ourselves (Python)
+        2. Pass the file contents to Claude as context
+        3. Have Claude analyze and output tasks
+
+        Args:
+            mission_objective: The high-level mission goal
+            project_dir: Working directory for Claude Code
+            claude_executor: ClaudeExecutor instance for running Claude Code
+            post_update: Async callback to post updates to Discord
+
+        Returns:
+            Dict with tasks, status, and summary
+        """
+        import glob
+        from pathlib import Path
+
+        self.conversation_history = []
+        tasks_found = []
+
+        if post_update:
+            await post_update("**Exploring codebase** to find relevant files...")
+
+        # Step 1: Explore the codebase ourselves
+        project_path = Path(project_dir)
+        relevant_files = []
+
+        # Search patterns for ML/trading code
+        patterns = [
+            "**/regime*.py", "**/*model*.py", "**/*ml*.py",
+            "**/paper*.py", "**/trading*.py", "**/inference*.py",
+            "**/train*.py", "**/predict*.py", "**/backtest*.py",
+            "**/strategy*.py", "**/risk*.py", "**/data*.py",
+            "**/config*.yaml", "**/config*.json"
+        ]
+
+        # Directories to exclude
+        exclude_dirs = ["__pycache__", "venv", ".venv", "node_modules", ".git"]
+
+        for pattern in patterns:
+            matches = list(project_path.glob(pattern))
+            for match in matches[:5]:  # Limit per pattern
+                match_str = str(match)
+                if match.is_file() and not any(ex in match_str for ex in exclude_dirs):
+                    relevant_files.append(match)
+
+        # Deduplicate
+        relevant_files = list(set(relevant_files))[:15]  # Max 15 files
+
+        if post_update:
+            file_list = "\n".join([f"- {f.name}" for f in relevant_files])
+            await post_update(f"**Found {len(relevant_files)} relevant files:**\n{file_list}")
+
+        # Step 2: Read the files
+        file_contents = {}
+        for file_path in relevant_files:
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                # Truncate long files
+                if len(content) > 3000:
+                    content = content[:3000] + "\n... (truncated)"
+                file_contents[str(file_path.relative_to(project_path))] = content
+            except Exception as e:
+                logger.warning(f"Could not read {file_path}: {e}")
+
+        # Step 3: Build context with file contents
+        context_parts = ["# CODEBASE ANALYSIS\n"]
+        for file_name, content in file_contents.items():
+            context_parts.append(f"\n## File: {file_name}\n```python\n{content}\n```\n")
+
+        codebase_context = "".join(context_parts)
+
+        # Step 4: Create prompt for Claude with the context
+        current_prompt = f"""YOU MUST OUTPUT TASKS IN THIS EXACT FORMAT. Do not have a conversation. Do not ask questions. Just output tasks.
+
+REQUIRED OUTPUT FORMAT (output at least 5 tasks):
+[TASK: data] description referencing specific files
+[TASK: tuning] description referencing specific files
+[TASK: backtest] description referencing specific files
+[TASK: risk] description referencing specific files
+[TASK: strategy] description referencing specific files
+
+MISSION: {mission_objective}
+
+CODEBASE FILES:
+{codebase_context}
+
+NOW OUTPUT YOUR TASKS using the [TASK: agent] format above. Reference actual files from the codebase. Do not explain, do not ask questions, just output the tasks."""
+
+        turn = 0
+        while turn < self.max_turns:
+            turn += 1
+
+            if post_update:
+                await post_update(f"**Manager Turn {turn}**: Sending prompt to Claude Code...")
+
+            # Execute with Claude Code
+            result = await claude_executor.execute(
+                agent_name="Strategy Agent",
+                agent_role="Mission planner and code analyst",
+                task_prompt=current_prompt,
+                context=None
+            )
+
+            claude_response = result.output if result.output else "No output"
+
+            if post_update:
+                # Post Claude's full response (will be chunked if needed)
+                await post_update(f"**Claude Response ({result.duration_seconds:.1f}s)**:\n{claude_response}")
+
+            # Parse any tasks from Claude's response
+            task_pattern = r'\[TASK:\s*(\w+)\]\s*(.+?)(?=\[TASK:|$)'
+            matches = re.findall(task_pattern, claude_response, re.IGNORECASE | re.DOTALL)
+
+            for agent_type, task_desc in matches:
+                tasks_found.append({
+                    "agent": agent_type.lower().strip(),
+                    "task": task_desc.strip()[:500]
+                })
+
+            # If we found tasks, mission planning is done
+            if tasks_found:
+                if post_update:
+                    await post_update(f"**Mission Planning Complete**: Found {len(tasks_found)} tasks!")
+                break
+
+            # Use GPT to evaluate and create follow-up prompt
+            evaluation = await self._evaluate_response(
+                mission_objective,
+                claude_response,
+                turn
+            )
+
+            if evaluation["complete"]:
+                break
+
+            if evaluation["follow_up_prompt"]:
+                current_prompt = evaluation["follow_up_prompt"]
+
+                if post_update:
+                    await post_update(f"**Manager**: {evaluation['reasoning']}")
+            else:
+                # No follow-up, but also no tasks - ask more directly
+                current_prompt = f"""The previous response didn't include any [TASK:] items.
+
+Please explore the codebase and output your implementation plan using this EXACT format:
+
+[TASK: data] description of data-related task
+[TASK: tuning] description of tuning-related task
+[TASK: backtest] description of testing task
+[TASK: risk] description of risk audit task
+[TASK: strategy] description of strategy task
+
+The objective is: {mission_objective}
+
+Use Glob and Read to explore files, then output the tasks."""
+
+        return {
+            "tasks": tasks_found,
+            "turns_used": turn,
+            "complete": len(tasks_found) > 0,
+            "summary": f"Found {len(tasks_found)} tasks in {turn} turns"
+        }
+
+    async def _evaluate_response(
+        self,
+        objective: str,
+        claude_response: str,
+        turn: int
+    ) -> Dict[str, Any]:
+        """
+        Use GPT-4o-mini to evaluate Claude's response and decide next steps.
+        """
+        if self.orch.provider == OrchestratorProvider.LOCAL:
+            # Fallback: simple heuristic
+            has_tasks = "[TASK:" in claude_response.upper()
+            return {
+                "complete": has_tasks,
+                "follow_up_prompt": None if has_tasks else "Please output tasks using [TASK: agent] format",
+                "reasoning": "Local evaluation"
+            }
+
+        eval_prompt = f"""You are managing an AI coding assistant. Evaluate its response and decide next steps.
+
+MISSION OBJECTIVE: {objective}
+
+CLAUDE'S RESPONSE:
+{claude_response[:2000]}
+
+TURN: {turn} of 10
+
+Questions to answer:
+1. Did Claude explore actual files in the codebase? (Look for file paths, function names)
+2. Did Claude output tasks in [TASK: agent] format?
+3. Are the tasks specific enough (reference actual files/functions)?
+
+If Claude didn't complete the mission planning, provide a follow-up prompt.
+
+Respond in JSON:
+{{
+    "explored_files": true/false,
+    "has_tasks": true/false,
+    "tasks_are_specific": true/false,
+    "complete": true/false,
+    "follow_up_prompt": "prompt to send if not complete, or null",
+    "reasoning": "brief explanation"
+}}"""
+
+        response, _ = await self.orch._call_cheap_llm(
+            eval_prompt,
+            system="You are a task manager evaluating AI responses. Respond only with valid JSON.",
+            max_tokens=500
+        )
+
+        try:
+            data = json.loads(response)
+            return {
+                "complete": data.get("complete", False),
+                "follow_up_prompt": data.get("follow_up_prompt"),
+                "reasoning": data.get("reasoning", "GPT evaluation")
+            }
+        except (json.JSONDecodeError, TypeError):
+            # Fallback
+            return {
+                "complete": "[TASK:" in claude_response.upper(),
+                "follow_up_prompt": None,
+                "reasoning": "JSON parse failed, using heuristic"
+            }
+
+
+# =============================================================================
 # SINGLETON INSTANCE
 # =============================================================================
 
