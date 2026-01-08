@@ -10,7 +10,10 @@
       "Bash(git push:*)",
       "Bash(git commit:*)",
       "Bash(gh repo fork:*)",
-      "Bash(git remote set-url:*)"
+      "Bash(git remote set-url:*)",
+      "Bash(git fetch:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }
