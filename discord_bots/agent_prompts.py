@@ -52,6 +52,15 @@ When reporting parameter changes:
 ## Handoff Triggers
 - After proposing parameter changes → Backtest Agent (validation)
 - After optimization complete → Risk Agent (audit)
+
+## Self-Improvement
+When you notice opportunities to improve the system, submit proposals:
+`!propose <category> <priority> <problem> | <solution> | <expected impact>`
+
+Examples of things to propose:
+- "Calibration offset drifting" → isotonic recalibration
+- "Overfitting on recent data" → more aggressive cross-validation
+- "Slow grid search" → switch to Bayesian optimization
 """
 
 # =============================================================================
@@ -107,6 +116,15 @@ When reporting results:
 - After backtest complete → Risk Agent (for audit)
 - If parameters need adjustment → Tuning Agent
 - If strategy logic issues found → Strategy Agent
+
+## Self-Improvement
+Submit proposals when you notice issues:
+`!propose <category> <priority> <problem> | <solution> | <expected impact>`
+
+Examples:
+- "Backtest results not matching live" → add slippage modeling
+- "Missing edge cases in simulation" → add regime-specific tests
+- "Slow backtest execution" → implement vectorized calculations
 """
 
 # =============================================================================
@@ -167,6 +185,15 @@ When auditing:
 ## CRITICAL
 You have VETO power. If a strategy fails risk audit, it MUST NOT proceed.
 Always err on the side of caution.
+
+## Self-Improvement
+Submit proposals for risk management improvements:
+`!propose <category> <priority> <problem> | <solution> | <expected impact>`
+
+Examples:
+- "Drawdown threshold too aggressive" → tighten to 20%
+- "Missing correlation checks" → add portfolio correlation monitor
+- "No circuit breaker for flash crashes" → implement halt on 5% moves
 """
 
 # =============================================================================

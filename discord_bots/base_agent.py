@@ -27,6 +27,8 @@ from claude_executor import ClaudeExecutor, TaskResult, TaskStatus, AgentCoordin
 from agent_prompts import AGENT_ROLES, HANDOFF_RULES, build_agent_role
 from vps_deployer import get_deployer, DeploymentStatus
 from mission_manager import get_mission_manager, MissionStatus
+from improvement_proposals import get_proposal_manager, ProposalStatus
+from scrum_manager import get_scrum_manager, StoryStatus, SprintStatus
 
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
@@ -166,6 +168,8 @@ class BaseAgentBot(ABC):
         self._register_execution_commands()
         self._register_user_commands()
         self._register_mission_commands()
+        self._register_proposal_commands()
+        self._register_scrum_commands()
 
     @classmethod
     def set_executor(cls, executor: ClaudeExecutor):
@@ -792,6 +796,620 @@ Respond with your mission breakdown and begin autonomous execution.""",
                 f"**MISSION ABORTED** by {ctx.author.mention}\n"
                 f"Mission {mission_id} has been cancelled. All agents stand by."
             )
+
+    def _register_proposal_commands(self):
+        """Register commands for improvement proposals."""
+
+        @self.bot.command(name="propose")
+        async def propose(ctx: commands.Context, category: str = None, priority: str = None, *, description: str = None):
+            """
+            Submit an improvement proposal.
+
+            Usage: !propose <category> <priority> <problem> | <solution> | <impact>
+
+            Categories: performance, accuracy, risk, data, architecture, strategy, automation, bug_fix, feature
+            Priorities: low, medium, high, critical
+            """
+            if not category or not priority or not description:
+                embed = discord.Embed(
+                    title="Submit Improvement Proposal",
+                    description="Noticed something that could be improved? Submit a proposal!",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(
+                    name="Usage",
+                    value="`!propose <category> <priority> <problem> | <solution> | <impact>`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Categories",
+                    value="`performance`, `accuracy`, `risk`, `data`, `architecture`, `strategy`, `automation`, `bug_fix`, `feature`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Priorities",
+                    value="`low`, `medium`, `high`, `critical`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Example",
+                    value="`!propose accuracy high Model predictions biased toward YES | Add isotonic calibration | Reduce prediction bias from 65% to 50%`",
+                    inline=False
+                )
+                await ctx.reply(embed=embed)
+                return
+
+            # Parse the description (problem | solution | impact)
+            parts = [p.strip() for p in description.split("|")]
+            if len(parts) < 3:
+                await ctx.reply(
+                    "Please separate problem, solution, and impact with `|`\n"
+                    "Example: `!propose accuracy high Model is biased | Add calibration | Fix 15% bias`"
+                )
+                return
+
+            problem, solution, impact = parts[0], parts[1], parts[2]
+
+            # Validate category and priority
+            valid_categories = ["performance", "accuracy", "risk", "data", "architecture", "strategy", "automation", "bug_fix", "feature"]
+            valid_priorities = ["low", "medium", "high", "critical"]
+
+            if category.lower() not in valid_categories:
+                await ctx.reply(f"Invalid category. Choose from: {', '.join(valid_categories)}")
+                return
+
+            if priority.lower() not in valid_priorities:
+                await ctx.reply(f"Invalid priority. Choose from: {', '.join(valid_priorities)}")
+                return
+
+            # Get current mission context if available
+            mission_manager = get_mission_manager()
+            discovered_during = ""
+            if mission_manager.current_mission:
+                discovered_during = f"Mission {mission_manager.current_mission.mission_id}"
+
+            # Submit the proposal
+            proposal_manager = get_proposal_manager()
+            proposal = await proposal_manager.submit_proposal(
+                submitted_by=self.agent_type,
+                category=category.lower(),
+                priority=priority.lower(),
+                problem=problem,
+                solution=solution,
+                expected_impact=impact,
+                discovered_during=discovered_during
+            )
+
+            embed = discord.Embed(
+                title=f"Proposal Submitted: {proposal.proposal_id}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Problem", value=problem[:200], inline=False)
+            embed.add_field(name="Solution", value=solution[:200], inline=False)
+            embed.add_field(name="Expected Impact", value=impact[:200], inline=False)
+            embed.add_field(name="Category", value=category, inline=True)
+            embed.add_field(name="Priority", value=priority, inline=True)
+            embed.set_footer(text=f"Submitted by {self.agent_name}")
+
+            await ctx.reply(embed=embed)
+
+            # Notify team channel
+            await self.post_to_team_channel(
+                f"💡 **New Improvement Proposal** from {self.agent_name}\n\n"
+                f"**{proposal.proposal_id}** | {priority.upper()}\n"
+                f"**Problem:** {problem[:100]}...\n\n"
+                f"*Use `!proposals` to review*"
+            )
+
+        @self.bot.command(name="proposals")
+        async def proposals(ctx: commands.Context):
+            """View pending improvement proposals."""
+            proposal_manager = get_proposal_manager()
+            review_queue = proposal_manager.get_review_queue()
+
+            # Discord has 2000 char limit, split if needed
+            if len(review_queue) > 1900:
+                # Send first part
+                await ctx.reply(review_queue[:1900] + "...")
+            else:
+                await ctx.reply(review_queue)
+
+        @self.bot.command(name="approve")
+        async def approve(ctx: commands.Context, proposal_id: str = None, *, notes: str = ""):
+            """Approve an improvement proposal (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can approve proposals.")
+                return
+
+            if not proposal_id:
+                await ctx.reply("Usage: `!approve <proposal_id> [notes]`")
+                return
+
+            proposal_manager = get_proposal_manager()
+            proposal = await proposal_manager.approve_proposal(proposal_id.upper(), notes)
+
+            if not proposal:
+                await ctx.reply(f"Proposal `{proposal_id}` not found.")
+                return
+
+            # Create a mission for the approved proposal
+            mission_manager = get_mission_manager()
+            mission = await mission_manager.create_mission(
+                objective=f"[{proposal.proposal_id}] {proposal.solution}",
+                context=f"Problem: {proposal.problem}\nExpected Impact: {proposal.expected_impact}",
+                created_by=f"Proposal from {proposal.submitted_by}"
+            )
+
+            proposal.implementation_mission_id = mission.mission_id
+            await proposal_manager._save_proposals()
+
+            embed = discord.Embed(
+                title=f"✅ Proposal Approved: {proposal.proposal_id}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Solution", value=proposal.solution[:500], inline=False)
+            embed.add_field(name="New Mission", value=f"`{mission.mission_id}`", inline=True)
+            embed.add_field(name="Assigned To", value=proposal.submitted_by, inline=True)
+            if notes:
+                embed.add_field(name="Operator Notes", value=notes, inline=False)
+
+            await ctx.reply(embed=embed)
+
+            # Notify team
+            await self.post_to_team_channel(
+                f"✅ **Proposal Approved!**\n\n"
+                f"**{proposal.proposal_id}** → Mission **{mission.mission_id}**\n"
+                f"**Solution:** {proposal.solution[:200]}\n\n"
+                f"**@{proposal.submitted_by.title()} Agent** - Please proceed with implementation."
+            )
+
+            # Queue handoff to the originating agent
+            if self._coordinator:
+                await self._coordinator.queue_handoff(
+                    from_agent="operator",
+                    to_agent=proposal.submitted_by,
+                    task=f"""APPROVED IMPROVEMENT: {proposal.solution}
+
+Your proposal {proposal.proposal_id} has been approved!
+
+Problem: {proposal.problem}
+Solution: {proposal.solution}
+Expected Impact: {proposal.expected_impact}
+
+Please implement this improvement now. When complete, hand off to the appropriate
+agent for validation (usually Backtest for testing, Risk for safety audit).""",
+                    context=f"Mission: {mission.mission_id}\nOperator notes: {notes}"
+                )
+
+        @self.bot.command(name="reject")
+        async def reject(ctx: commands.Context, proposal_id: str = None, *, reason: str = ""):
+            """Reject an improvement proposal (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can reject proposals.")
+                return
+
+            if not proposal_id:
+                await ctx.reply("Usage: `!reject <proposal_id> [reason]`")
+                return
+
+            proposal_manager = get_proposal_manager()
+            proposal = await proposal_manager.reject_proposal(proposal_id.upper(), reason)
+
+            if not proposal:
+                await ctx.reply(f"Proposal `{proposal_id}` not found.")
+                return
+
+            embed = discord.Embed(
+                title=f"❌ Proposal Rejected: {proposal.proposal_id}",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Problem", value=proposal.problem[:200], inline=False)
+            if reason:
+                embed.add_field(name="Reason", value=reason, inline=False)
+
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="defer")
+        async def defer(ctx: commands.Context, proposal_id: str = None, *, reason: str = ""):
+            """Defer a proposal for later consideration (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can defer proposals.")
+                return
+
+            if not proposal_id:
+                await ctx.reply("Usage: `!defer <proposal_id> [reason]`")
+                return
+
+            proposal_manager = get_proposal_manager()
+            proposal = await proposal_manager.defer_proposal(proposal_id.upper(), reason)
+
+            if not proposal:
+                await ctx.reply(f"Proposal `{proposal_id}` not found.")
+                return
+
+            embed = discord.Embed(
+                title=f"⏸️ Proposal Deferred: {proposal.proposal_id}",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Problem", value=proposal.problem[:200], inline=False)
+            if reason:
+                embed.add_field(name="Reason", value=reason, inline=False)
+            embed.set_footer(text="This proposal will be reconsidered later")
+
+            await ctx.reply(embed=embed)
+
+    def _register_scrum_commands(self):
+        """Register SCRUM methodology commands."""
+
+        # =====================================================================
+        # BACKLOG COMMANDS
+        # =====================================================================
+
+        @self.bot.command(name="story")
+        async def story(ctx: commands.Context, action: str = None, *, args: str = None):
+            """
+            Manage user stories in the backlog.
+
+            Usage:
+              !story add <title> | <description> | <type> | <points>
+              !story view <story_id>
+              !story update <story_id> <status>
+              !story assign <story_id> <agent>
+            """
+            if not action:
+                await ctx.reply(
+                    "**Story Commands:**\n"
+                    "`!story add <title> | <description> | <type> | <points>`\n"
+                    "`!story view <story_id>`\n"
+                    "`!story update <story_id> <status>`\n"
+                    "`!story assign <story_id> <agent>`\n\n"
+                    "Types: feature, bug, improvement, research, technical\n"
+                    "Status: backlog, sprint, in_progress, in_review, done, blocked"
+                )
+                return
+
+            scrum = get_scrum_manager()
+
+            if action == "add":
+                if not args:
+                    await ctx.reply("Usage: `!story add <title> | <description> | <type> | <points>`")
+                    return
+
+                parts = [p.strip() for p in args.split("|")]
+                title = parts[0]
+                description = parts[1] if len(parts) > 1 else ""
+                story_type = parts[2] if len(parts) > 2 else "feature"
+                points = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+
+                story = await scrum.create_story(
+                    title=title,
+                    description=description,
+                    story_type=story_type.lower(),
+                    story_points=points
+                )
+
+                embed = discord.Embed(
+                    title=f"Story Created: {story.story_id}",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Title", value=title, inline=False)
+                embed.add_field(name="Type", value=story_type, inline=True)
+                embed.add_field(name="Points", value=str(points) or "Not estimated", inline=True)
+
+                await ctx.reply(embed=embed)
+
+            elif action == "view":
+                story_id = args.upper() if args else None
+                if not story_id:
+                    await ctx.reply("Usage: `!story view <story_id>`")
+                    return
+
+                story = scrum.stories.get(story_id)
+                if not story:
+                    await ctx.reply(f"Story `{story_id}` not found.")
+                    return
+
+                embed = discord.Embed(
+                    title=f"{story.story_id}: {story.title}",
+                    description=story.description,
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Status", value=story.status.value, inline=True)
+                embed.add_field(name="Type", value=story.story_type.value, inline=True)
+                embed.add_field(name="Points", value=str(story.story_points), inline=True)
+                embed.add_field(name="Assigned", value=story.assigned_to or "Unassigned", inline=True)
+
+                if story.acceptance_criteria:
+                    criteria = "\n".join([f"• {c}" for c in story.acceptance_criteria])
+                    embed.add_field(name="Acceptance Criteria", value=criteria, inline=False)
+
+                await ctx.reply(embed=embed)
+
+            elif action == "update":
+                if not args:
+                    await ctx.reply("Usage: `!story update <story_id> <status>`")
+                    return
+
+                parts = args.split()
+                story_id = parts[0].upper()
+                status = parts[1].lower() if len(parts) > 1 else None
+
+                if not status:
+                    await ctx.reply("Please specify a status: backlog, sprint, in_progress, in_review, done, blocked")
+                    return
+
+                story = await scrum.update_story_status(story_id, status)
+                if story:
+                    await ctx.reply(f"✅ Story `{story_id}` updated to **{status}**")
+                else:
+                    await ctx.reply(f"Story `{story_id}` not found.")
+
+            elif action == "assign":
+                if not args:
+                    await ctx.reply("Usage: `!story assign <story_id> <agent>`")
+                    return
+
+                parts = args.split()
+                story_id = parts[0].upper()
+                agent = parts[1].lower() if len(parts) > 1 else None
+
+                if not agent:
+                    await ctx.reply("Please specify an agent: tuning, backtest, risk, strategy, data")
+                    return
+
+                story = await scrum.update_story_status(story_id, scrum.stories[story_id].status.value, assigned_to=agent)
+                if story:
+                    await ctx.reply(f"✅ Story `{story_id}` assigned to **{agent}**")
+                else:
+                    await ctx.reply(f"Story `{story_id}` not found.")
+
+        @self.bot.command(name="backlog")
+        async def backlog(ctx: commands.Context):
+            """View the product backlog."""
+            scrum = get_scrum_manager()
+            view = scrum.get_backlog_view()
+            await ctx.reply(view)
+
+        # =====================================================================
+        # SPRINT COMMANDS
+        # =====================================================================
+
+        @self.bot.command(name="sprint")
+        async def sprint(ctx: commands.Context, action: str = None, *, args: str = None):
+            """
+            Manage sprints.
+
+            Usage:
+              !sprint create <name> | <goal>
+              !sprint start [sprint_id]
+              !sprint add <story_id>
+              !sprint end
+              !sprint board
+            """
+            if not action:
+                await ctx.reply(
+                    "**Sprint Commands:**\n"
+                    "`!sprint create <name> | <goal>` - Create new sprint\n"
+                    "`!sprint start [sprint_id]` - Start a sprint\n"
+                    "`!sprint add <story_id>` - Add story to sprint\n"
+                    "`!sprint end` - End current sprint\n"
+                    "`!sprint board` - View sprint board\n"
+                    "`!sprint retro` - Run retrospective"
+                )
+                return
+
+            scrum = get_scrum_manager()
+
+            if action == "create":
+                if not self._is_owner(ctx.author.id):
+                    await ctx.reply("Only the operator can create sprints.")
+                    return
+
+                if not args:
+                    await ctx.reply("Usage: `!sprint create <name> | <goal>`")
+                    return
+
+                parts = [p.strip() for p in args.split("|")]
+                name = parts[0]
+                goal = parts[1] if len(parts) > 1 else "Sprint goal not specified"
+
+                sprint_obj = await scrum.create_sprint(name=name, goal=goal)
+
+                embed = discord.Embed(
+                    title=f"Sprint Created: {sprint_obj.sprint_id}",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Name", value=name, inline=True)
+                embed.add_field(name="Goal", value=goal, inline=False)
+                embed.add_field(name="Duration", value=f"{sprint_obj.duration_days} days", inline=True)
+                embed.set_footer(text="Use !sprint add <story_id> to add stories, then !sprint start")
+
+                await ctx.reply(embed=embed)
+                await self.post_to_team_channel(
+                    f"📅 **New Sprint Created:** {sprint_obj.sprint_id}\n"
+                    f"**{name}**\n"
+                    f"Goal: {goal}"
+                )
+
+            elif action == "start":
+                if not self._is_owner(ctx.author.id):
+                    await ctx.reply("Only the operator can start sprints.")
+                    return
+
+                sprint_id = args.upper() if args else None
+
+                # If no sprint_id, find latest planning sprint
+                if not sprint_id:
+                    planning = [s for s in scrum.sprints.values() if s.status == SprintStatus.PLANNING]
+                    if planning:
+                        sprint_id = planning[-1].sprint_id
+                    else:
+                        await ctx.reply("No sprint in planning. Create one with `!sprint create`")
+                        return
+
+                sprint_obj = await scrum.start_sprint(sprint_id)
+                if not sprint_obj:
+                    await ctx.reply(f"Sprint `{sprint_id}` not found.")
+                    return
+
+                embed = discord.Embed(
+                    title=f"🏃 Sprint Started: {sprint_obj.name}",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Goal", value=sprint_obj.goal, inline=False)
+                embed.add_field(name="Committed", value=f"{sprint_obj.committed_points} points", inline=True)
+                embed.add_field(name="Duration", value=f"{sprint_obj.duration_days} days", inline=True)
+                embed.add_field(name="Stories", value=str(len(sprint_obj.story_ids)), inline=True)
+
+                await ctx.reply(embed=embed)
+                await self.post_to_team_channel(
+                    f"🏃 **Sprint Started!**\n\n"
+                    f"**{sprint_obj.sprint_id}: {sprint_obj.name}**\n"
+                    f"**Goal:** {sprint_obj.goal}\n"
+                    f"**Committed:** {sprint_obj.committed_points} points\n\n"
+                    f"Let's go team! 🚀"
+                )
+
+            elif action == "add":
+                if not args:
+                    await ctx.reply("Usage: `!sprint add <story_id>`")
+                    return
+
+                story_id = args.upper()
+                current = scrum.get_current_sprint()
+
+                # If no active sprint, try latest planning sprint
+                if not current:
+                    planning = [s for s in scrum.sprints.values() if s.status == SprintStatus.PLANNING]
+                    if planning:
+                        current = planning[-1]
+                    else:
+                        await ctx.reply("No sprint available. Create one with `!sprint create`")
+                        return
+
+                story = await scrum.add_to_sprint(current.sprint_id, story_id)
+                if story:
+                    await ctx.reply(f"✅ Added `{story_id}` to {current.sprint_id}")
+                else:
+                    await ctx.reply(f"Story `{story_id}` not found.")
+
+            elif action == "end":
+                if not self._is_owner(ctx.author.id):
+                    await ctx.reply("Only the operator can end sprints.")
+                    return
+
+                current = scrum.get_current_sprint()
+                if not current:
+                    await ctx.reply("No active sprint to end.")
+                    return
+
+                sprint_obj = await scrum.end_sprint(current.sprint_id)
+                progress = sprint_obj.get_progress()
+
+                embed = discord.Embed(
+                    title=f"Sprint Ended: {sprint_obj.name}",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(name="Completed", value=f"{progress['completed']}/{progress['committed']} points", inline=True)
+                embed.add_field(name="Completion", value=f"{progress['percent']}%", inline=True)
+                embed.set_footer(text="Run !sprint retro to conduct retrospective")
+
+                await ctx.reply(embed=embed)
+                await self.post_to_team_channel(
+                    f"🏁 **Sprint Ended:** {sprint_obj.name}\n"
+                    f"**Completed:** {progress['completed']}/{progress['committed']} points ({progress['percent']}%)\n\n"
+                    f"Time for retrospective! Use `!sprint retro`"
+                )
+
+            elif action == "board":
+                board = scrum.get_sprint_board()
+                if len(board) > 1900:
+                    await ctx.reply(board[:1900] + "...")
+                else:
+                    await ctx.reply(board)
+
+            elif action == "retro":
+                if not self._is_owner(ctx.author.id):
+                    await ctx.reply("Only the operator can run retrospectives.")
+                    return
+
+                # Find sprint in review
+                review_sprints = [s for s in scrum.sprints.values() if s.status == SprintStatus.REVIEW]
+                if not review_sprints:
+                    await ctx.reply("No sprint in review. End a sprint first with `!sprint end`")
+                    return
+
+                sprint_obj = review_sprints[-1]
+
+                embed = discord.Embed(
+                    title=f"🔄 Sprint Retrospective: {sprint_obj.name}",
+                    description="Please provide feedback using:\n`!retro_feedback <type> <feedback>`",
+                    color=discord.Color.purple()
+                )
+                embed.add_field(
+                    name="Types",
+                    value="• `good` - What went well\n• `improve` - What to improve\n• `action` - Action items",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Example",
+                    value="`!retro_feedback good Team communication was excellent`",
+                    inline=False
+                )
+
+                await ctx.reply(embed=embed)
+
+        @self.bot.command(name="retro_feedback")
+        async def retro_feedback(ctx: commands.Context, feedback_type: str = None, *, feedback: str = None):
+            """Submit retrospective feedback."""
+            if not feedback_type or not feedback:
+                await ctx.reply("Usage: `!retro_feedback <good|improve|action> <feedback>`")
+                return
+
+            scrum = get_scrum_manager()
+
+            # Find sprint in review/retro
+            retro_sprints = [
+                s for s in scrum.sprints.values()
+                if s.status in [SprintStatus.REVIEW, SprintStatus.RETRO]
+            ]
+            if not retro_sprints:
+                await ctx.reply("No sprint in retrospective phase.")
+                return
+
+            sprint_obj = retro_sprints[-1]
+
+            if feedback_type.lower() == "good":
+                sprint_obj.went_well.append(f"{self.agent_name}: {feedback}")
+                await scrum._save_data()
+                await ctx.reply("✅ Added to 'What went well'")
+
+            elif feedback_type.lower() == "improve":
+                sprint_obj.to_improve.append(f"{self.agent_name}: {feedback}")
+                await scrum._save_data()
+                await ctx.reply("✅ Added to 'What to improve'")
+
+            elif feedback_type.lower() == "action":
+                sprint_obj.action_items.append(f"{self.agent_name}: {feedback}")
+                await scrum._save_data()
+                await ctx.reply("✅ Added to 'Action items'")
+
+            else:
+                await ctx.reply("Invalid type. Use: good, improve, or action")
+
+        @self.bot.command(name="standup")
+        async def standup(ctx: commands.Context):
+            """Show daily standup summary."""
+            scrum = get_scrum_manager()
+            standup_view = scrum.get_daily_standup()
+            await ctx.reply(standup_view)
+
+        @self.bot.command(name="velocity")
+        async def velocity(ctx: commands.Context):
+            """Show team velocity report."""
+            scrum = get_scrum_manager()
+            report = scrum.get_velocity_report()
+            await ctx.reply(report)
 
     async def _post_task_result(self, channel, result: TaskResult):
         """Post task execution result to Discord."""
