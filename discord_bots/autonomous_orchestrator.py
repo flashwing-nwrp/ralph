@@ -28,6 +28,7 @@ load_dotenv()
 
 from claude_executor import ClaudeExecutor, AgentCoordinator, TaskStatus
 from base_agent import BaseAgentBot
+from mission_manager import MissionManager, set_mission_manager, get_mission_manager
 from agents import (
     TuningAgent,
     BacktestAgent,
@@ -54,6 +55,10 @@ class AutonomousOrchestrator:
         # Initialize execution infrastructure
         self.executor = ClaudeExecutor(project_dir=project_dir)
         self.coordinator = AgentCoordinator(self.executor)
+
+        # Initialize mission manager
+        self.mission_manager = MissionManager(project_dir=project_dir)
+        set_mission_manager(self.mission_manager)
 
         # Set shared instances on base class
         BaseAgentBot.set_executor(self.executor)

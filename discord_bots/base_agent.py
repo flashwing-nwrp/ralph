@@ -24,8 +24,9 @@ load_dotenv()
 
 # Import execution engine
 from claude_executor import ClaudeExecutor, TaskResult, TaskStatus, AgentCoordinator
-from agent_prompts import AGENT_ROLES, HANDOFF_RULES
+from agent_prompts import AGENT_ROLES, HANDOFF_RULES, build_agent_role
 from vps_deployer import get_deployer, DeploymentStatus
+from mission_manager import get_mission_manager, MissionStatus
 
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
@@ -117,8 +118,8 @@ class BaseAgentBot(ABC):
         self.agent_type = agent_type
         self.description = description
 
-        # Get role from prompts
-        self.agent_role = AGENT_ROLES.get(agent_type, description)
+        # Get role from prompts (with project-specific context)
+        self.agent_role = build_agent_role(agent_type, include_project_context=True)
 
         # Load token
         self.token = os.getenv(token_env_var)
@@ -164,6 +165,7 @@ class BaseAgentBot(ABC):
         self._register_commands()
         self._register_execution_commands()
         self._register_user_commands()
+        self._register_mission_commands()
 
     @classmethod
     def set_executor(cls, executor: ClaudeExecutor):
@@ -345,7 +347,9 @@ class BaseAgentBot(ABC):
                 value=(
                     "`!ping` - Check bot latency\n"
                     "`!status` - Get agent status\n"
-                    "`!help` - Show this message"
+                    "`!help` - Show this message\n"
+                    "`!mission <goal>` - Set a new mission (owner)\n"
+                    "`!mission_status` - Check mission progress"
                 ),
                 inline=False
             )
@@ -646,6 +650,148 @@ class BaseAgentBot(ABC):
                 )
             else:
                 await ctx.reply(f"Restart failed: {message}")
+
+    def _register_mission_commands(self):
+        """Register commands for mission/goal management."""
+
+        @self.bot.command(name="mission")
+        async def mission(ctx: commands.Context, *, objective: str = None):
+            """Set a new mission/goal for the agent ensemble (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can set missions.")
+                return
+
+            if not objective:
+                # Show current mission status
+                manager = get_mission_manager()
+                summary = manager.get_mission_summary()
+                await ctx.reply(summary)
+                return
+
+            # Create new mission
+            manager = get_mission_manager()
+            mission = await manager.create_mission(
+                objective=objective,
+                created_by=str(ctx.author)
+            )
+
+            # Acknowledge creation
+            embed = discord.Embed(
+                title=f"Mission Created: {mission.mission_id}",
+                description=objective,
+                color=discord.Color.gold(),
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(
+                name="Status",
+                value="Routing to **Strategy Agent** for planning...",
+                inline=False
+            )
+            embed.set_footer(text="Use !mission to check progress")
+            await ctx.reply(embed=embed)
+
+            # Notify the team
+            await self.post_to_team_channel(
+                f"**NEW MISSION** from {ctx.author.mention}\n\n"
+                f"**{mission.mission_id}**: {objective}\n\n"
+                f"**@Strategy Agent** - Please break down this mission into actionable tasks."
+            )
+
+            # Trigger Strategy Agent to plan the mission
+            if self._coordinator:
+                await self._coordinator.queue_handoff(
+                    from_agent="operator",
+                    to_agent="strategy",
+                    task=f"""NEW MISSION: {objective}
+
+You are receiving a new mission from the operator. Your job is to:
+
+1. Analyze the mission objective
+2. Break it down into specific, actionable tasks
+3. Assign each task to the appropriate agent:
+   - tuning: Parameter optimization, hyperparameter search
+   - backtest: Simulation, validation, performance testing
+   - risk: Safety audits, risk assessment, compliance
+   - data: Data preprocessing, feature engineering, data quality
+   - strategy: Strategy logic, signal generation (yourself)
+
+4. Identify dependencies between tasks (what must complete before what)
+5. Post a mission plan to #ralph-team
+
+After planning, begin executing by handing off tasks to the appropriate agents.
+
+Respond with your mission breakdown and begin autonomous execution.""",
+                    context=f"Mission ID: {mission.mission_id}\nCreated by: {ctx.author}\nObjective: {objective}"
+                )
+
+        @self.bot.command(name="mission_status")
+        async def mission_status(ctx: commands.Context):
+            """Check the current mission status."""
+            manager = get_mission_manager()
+            summary = manager.get_mission_summary()
+            await ctx.reply(summary)
+
+        @self.bot.command(name="pause_mission")
+        async def pause_mission(ctx: commands.Context):
+            """Pause the current mission (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can pause missions.")
+                return
+
+            manager = get_mission_manager()
+            if not manager.current_mission:
+                await ctx.reply("No active mission to pause.")
+                return
+
+            await manager.pause_mission()
+            await ctx.reply(f"Mission **{manager.current_mission.mission_id}** paused.")
+            await self.post_to_team_channel(
+                f"**MISSION PAUSED** by {ctx.author.mention}\n"
+                f"All agents should complete current tasks and stand by."
+            )
+
+        @self.bot.command(name="resume_mission")
+        async def resume_mission(ctx: commands.Context):
+            """Resume a paused mission (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can resume missions.")
+                return
+
+            manager = get_mission_manager()
+            if not manager.current_mission:
+                await ctx.reply("No mission to resume.")
+                return
+
+            await manager.resume_mission()
+            await ctx.reply(f"Mission **{manager.current_mission.mission_id}** resumed.")
+            await self.post_to_team_channel(
+                f"**MISSION RESUMED** by {ctx.author.mention}\n"
+                f"All agents resume normal operations."
+            )
+
+        @self.bot.command(name="abort_mission")
+        async def abort_mission(ctx: commands.Context):
+            """Abort the current mission (owner only)."""
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can abort missions.")
+                return
+
+            manager = get_mission_manager()
+            if not manager.current_mission:
+                await ctx.reply("No active mission to abort.")
+                return
+
+            mission_id = manager.current_mission.mission_id
+            manager.current_mission = None
+            # Remove the mission file
+            if manager.mission_file.exists():
+                manager.mission_file.unlink()
+
+            await ctx.reply(f"Mission **{mission_id}** aborted.")
+            await self.post_to_team_channel(
+                f"**MISSION ABORTED** by {ctx.author.mention}\n"
+                f"Mission {mission_id} has been cancelled. All agents stand by."
+            )
 
     async def _post_task_result(self, channel, result: TaskResult):
         """Post task execution result to Discord."""

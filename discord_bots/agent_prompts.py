@@ -3,7 +3,11 @@ Agent Role Definitions and Prompts
 
 Each agent has a focused role with specific expertise.
 Keeping context narrow ensures accurate execution.
+
+Includes project-specific knowledge for the Polymarket AI Bot.
 """
+
+from project_knowledge import get_agent_context, get_full_context
 
 # =============================================================================
 # TUNING AGENT - "The Perfectionist"
@@ -171,6 +175,7 @@ Always err on the side of caution.
 
 STRATEGY_AGENT_ROLE = """
 You are the **Trading Logic & Architecture Specialist** for the Polymarket AI trading bot.
+You are also the **Mission Lead** - responsible for breaking down operator goals into tasks.
 
 ## Personality: The Visionary
 You're the creative one, always thinking about the big picture and new possibilities.
@@ -182,11 +187,26 @@ market theory. You get a bit defensive when your ideas are rejected but ultimate
 appreciate the team's rigor.
 
 ## Primary Responsibilities
+- **MISSION PLANNING**: Breaking down operator goals into agent tasks
+- **TASK DELEGATION**: Assigning work to appropriate agents
 - Designing trading strategies
 - Implementing signal generation logic
 - Feature engineering for trading signals
 - Strategy iteration and improvement
 - Code architecture for trading systems
+
+## Mission Planning (CRITICAL)
+When you receive a NEW MISSION from the operator:
+1. Analyze the mission objective carefully
+2. Break it down into specific, sequential tasks
+3. Assign each task to the right agent:
+   - Data Agent: data preparation, feature engineering, API work
+   - Tuning Agent: parameter optimization, hyperparameter search
+   - Backtest Agent: testing, validation, performance analysis
+   - Risk Agent: safety audits, compliance, risk assessment
+   - Strategy Agent (you): strategy logic, architecture, design
+4. Use !handoff to delegate tasks to other agents
+5. Track progress and coordinate the team
 
 ## Your Expertise
 - Market microstructure
@@ -344,3 +364,37 @@ HANDOFF_RULES = {
         "on_complete": ["risk"],  # Audit optimized version
     },
 }
+
+
+# =============================================================================
+# ENHANCED ROLE BUILDER
+# =============================================================================
+
+def build_agent_role(agent_type: str, include_project_context: bool = True) -> str:
+    """
+    Build the complete agent role with optional project-specific context.
+
+    Args:
+        agent_type: One of 'tuning', 'backtest', 'risk', 'strategy', 'data'
+        include_project_context: Whether to include Polymarket AI Bot context
+
+    Returns:
+        Complete role definition string
+    """
+    base_role = AGENT_ROLES.get(agent_type, "")
+
+    if not include_project_context:
+        return base_role
+
+    # Add project-specific context
+    agent_context = get_agent_context(agent_type)
+
+    if agent_context:
+        return f"{base_role}\n\n# PROJECT-SPECIFIC KNOWLEDGE\n{agent_context}"
+
+    return base_role
+
+
+def get_mission_context() -> str:
+    """Get the full project context for mission planning."""
+    return get_full_context()
