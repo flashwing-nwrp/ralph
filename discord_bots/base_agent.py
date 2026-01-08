@@ -364,6 +364,14 @@ class BaseAgentBot(ABC):
         if is_owner:
             self.logger.info(f"Owner directive: {content[:100]}")
 
+            # Strategy Agent: Check for plan amendment requests
+            if self.agent_type == "strategy":
+                plan_keywords = ["add", "include", "also", "plus", "integrate", "incorporate",
+                                 "remove", "skip", "exclude", "drop", "change", "modify", "update"]
+                if any(word in content.lower() for word in plan_keywords):
+                    await self._handle_plan_amendment(message, content)
+                    return
+
             # If it looks like a question, answer it
             if "?" in content:
                 await self._respond_to_question(message, content)
@@ -382,6 +390,107 @@ class BaseAgentBot(ABC):
             await message.reply(
                 f"I heard you! For task execution, use `!do <task>` or ask the operator."
             )
+
+    async def _handle_plan_amendment(self, message: discord.Message, request: str):
+        """
+        Handle a request to amend the current mission plan.
+
+        Strategy Agent parses the request and adds/modifies tasks accordingly.
+        """
+        manager = get_mission_manager()
+        if not manager.current_mission:
+            await message.reply(
+                "No active mission to amend. Start one with `!mission <objective>`"
+            )
+            return
+
+        await message.reply(f"Analyzing plan amendment request...")
+
+        # Use orchestration layer to parse the request
+        if self._orchestrator:
+            try:
+                # Ask the cheap LLM to parse the amendment request
+                parse_prompt = f"""Analyze this plan amendment request and extract structured tasks.
+
+Current mission: {manager.current_mission.objective}
+
+Amendment request: "{request}"
+
+For each task to add, output in this format:
+[ADD_TASK: agent_type] task description
+
+Valid agent_types: tuning, backtest, risk, strategy, data
+
+If tasks should be removed or modified, output:
+[REMOVE_TASK: task_id] reason
+[MODIFY_TASK: task_id] new description
+
+Only output the structured commands, no other text."""
+
+                response, _ = await self._orchestrator._call_cheap_llm(
+                    parse_prompt,
+                    system="You are a task parser for a trading bot development team. Extract structured task commands.",
+                    max_tokens=500
+                )
+
+                if response:
+                    import re
+
+                    # Parse ADD_TASK commands
+                    add_pattern = r'\[ADD_TASK:\s*(\w+)\]\s*(.+?)(?=\[ADD_TASK:|\\[REMOVE_TASK:|\\[MODIFY_TASK:|$)'
+                    add_matches = re.findall(add_pattern, response, re.IGNORECASE | re.DOTALL)
+
+                    tasks_added = []
+                    for agent_type, task_desc in add_matches:
+                        agent_type = agent_type.lower().strip()
+                        task_desc = task_desc.strip()
+
+                        if agent_type in ["tuning", "backtest", "risk", "strategy", "data"] and task_desc:
+                            task = await manager.add_task_to_mission(
+                                description=task_desc,
+                                assigned_to=agent_type,
+                                priority="medium"
+                            )
+                            if task:
+                                tasks_added.append((task.task_id, agent_type, task_desc[:80]))
+
+                    if tasks_added:
+                        # Post confirmation
+                        task_list = "\n".join([
+                            f"• `{tid}` → **{agent.title()}**: {desc}..."
+                            for tid, agent, desc in tasks_added
+                        ])
+                        await message.reply(
+                            f"**Plan Updated!** Added {len(tasks_added)} task(s):\n{task_list}"
+                        )
+
+                        # Notify team channel
+                        await self.post_to_team_channel(
+                            f"📋 **Plan Amended** by {message.author.mention}\n"
+                            f"Added {len(tasks_added)} new task(s) to mission {manager.current_mission.mission_id}"
+                        )
+                    else:
+                        await message.reply(
+                            "I understood your request but couldn't parse specific tasks. "
+                            "Try: `!add_task <agent> <description>` for explicit task addition."
+                        )
+                else:
+                    await message.reply("Could not parse the amendment request. Please try again.")
+
+            except Exception as e:
+                self.logger.error(f"Error handling plan amendment: {e}")
+                await message.reply(f"Error processing request: {str(e)[:100]}")
+        else:
+            # Fallback: treat as a simple task addition for strategy agent
+            task = await manager.add_task_to_mission(
+                description=request,
+                assigned_to="strategy",
+                priority="medium"
+            )
+            if task:
+                await message.reply(f"Added task `{task.task_id}` to Strategy Agent")
+            else:
+                await message.reply("Failed to add task. No orchestrator available.")
 
     async def _respond_to_question(self, message: discord.Message, question: str):
         """Respond to a question using Claude Code."""
