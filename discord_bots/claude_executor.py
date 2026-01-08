@@ -23,6 +23,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Import knowledge base for context injection
+try:
+    from knowledge_base import get_knowledge_base
+    KNOWLEDGE_BASE_AVAILABLE = True
+except ImportError:
+    KNOWLEDGE_BASE_AVAILABLE = False
+
 logger = logging.getLogger("claude_executor")
 
 
@@ -251,7 +258,7 @@ class ClaudeExecutor:
         task_prompt: str,
         context: Optional[str] = None
     ) -> str:
-        """Build the full prompt with agent persona and context."""
+        """Build the full prompt with agent persona, context, and relevant learnings."""
 
         # Build a more action-oriented prompt
         prompt_parts = [
@@ -266,6 +273,21 @@ class ClaudeExecutor:
                 f"CONTEXT: {context}",
                 f"",
             ])
+
+        # Inject relevant learnings from knowledge base (keeps context small)
+        if KNOWLEDGE_BASE_AVAILABLE:
+            try:
+                kb = get_knowledge_base()
+                # Extract agent type from name (e.g., "Tuning Agent" -> "tuning")
+                agent_type = agent_name.lower().replace(" agent", "").strip()
+                learnings_context = kb.get_context_for_agent(agent_type, task_prompt)
+                if learnings_context:
+                    prompt_parts.extend([
+                        learnings_context,
+                        f"",
+                    ])
+            except Exception as e:
+                logger.debug(f"Failed to fetch learnings context: {e}")
 
         prompt_parts.extend([
             f"INSTRUCTIONS:",

@@ -415,7 +415,7 @@ class RALPHEmbeds:
     ) -> discord.Embed:
         """Create embed for mission completion."""
         embed = discord.Embed(
-            title="\U0001F3C6 Mission Complete",
+            title="🏆 Mission Complete",
             description=f"**Objective:** {mission_objective[:200]}",
             color=0x2ECC71,  # Green
             timestamp=datetime.utcnow()
@@ -428,12 +428,12 @@ class RALPHEmbeds:
 
         embed.add_field(
             name="Tasks Completed",
-            value=f"\u2705 **{total_tasks}**",
+            value=f"✅ **{total_tasks}**",
             inline=True
         )
         embed.add_field(
             name="Total Duration",
-            value=f"\u23F1 **{time_str}**",
+            value=f"⏱ **{time_str}**",
             inline=True
         )
 
@@ -450,6 +450,122 @@ class RALPHEmbeds:
             )
 
         embed.set_footer(text="RALPH | Mission Successful")
+        return embed
+
+    @staticmethod
+    def executive_summary(
+        mission_id: str,
+        mission_objective: str,
+        total_tasks: int,
+        duration_minutes: float,
+        key_findings: List[str],
+        work_summary: str,
+        suggestions: List[str],
+        owner_mention: str = None
+    ) -> List[discord.Embed]:
+        """
+        Create executive summary embeds for mission completion.
+        Returns multiple embeds to handle Discord's character limits.
+        """
+        embeds = []
+
+        # Main summary embed
+        main_embed = discord.Embed(
+            title=f"📋 Executive Summary: {mission_id}",
+            description=f"{'@' + owner_mention + ' ' if owner_mention else ''}**Mission Complete!**\n\n{mission_objective[:300]}",
+            color=0xFFD700,  # Gold
+            timestamp=datetime.utcnow()
+        )
+
+        main_embed.add_field(
+            name="📊 Stats",
+            value=f"✅ **{total_tasks}** tasks completed\n⏱️ **{duration_minutes:.1f}** minutes total",
+            inline=True
+        )
+
+        # Work performed summary
+        if work_summary:
+            main_embed.add_field(
+                name="🔨 Work Performed",
+                value=work_summary[:1000],
+                inline=False
+            )
+
+        embeds.append(main_embed)
+
+        # Key findings embed
+        if key_findings:
+            findings_embed = discord.Embed(
+                title="🔍 Key Findings",
+                color=0x3498DB,  # Blue
+            )
+            findings_text = "\n".join([f"• {f[:200]}" for f in key_findings[:8]])
+            findings_embed.description = findings_text[:4000]
+            embeds.append(findings_embed)
+
+        # Suggestions embed
+        if suggestions:
+            suggestions_embed = discord.Embed(
+                title="💡 Suggested Next Steps",
+                description="Based on this mission's results, consider:",
+                color=0x9B59B6,  # Purple
+            )
+            for i, suggestion in enumerate(suggestions[:5], 1):
+                suggestions_embed.add_field(
+                    name=f"Suggestion {i}",
+                    value=suggestion[:500],
+                    inline=False
+                )
+            suggestions_embed.set_footer(text="These are AI-generated suggestions. Use your judgment.")
+            embeds.append(suggestions_embed)
+
+        return embeds
+
+    @staticmethod
+    def retrospective(
+        mission_id: str,
+        what_went_well: List[str],
+        what_could_improve: List[str],
+        learnings: List[str],
+        action_items: List[str]
+    ) -> discord.Embed:
+        """Create retrospective embed for mission review."""
+        embed = discord.Embed(
+            title=f"🔄 Retrospective: {mission_id}",
+            description="Team reflection and continuous improvement",
+            color=0xE67E22,  # Orange
+            timestamp=datetime.utcnow()
+        )
+
+        if what_went_well:
+            embed.add_field(
+                name="✅ What Went Well",
+                value="\n".join([f"• {w[:100]}" for w in what_went_well[:4]]),
+                inline=False
+            )
+
+        if what_could_improve:
+            embed.add_field(
+                name="🔧 Areas for Improvement",
+                value="\n".join([f"• {w[:100]}" for w in what_could_improve[:4]]),
+                inline=False
+            )
+
+        if learnings:
+            embed.add_field(
+                name="📚 Key Learnings",
+                value="\n".join([f"• {l[:100]}" for l in learnings[:4]]),
+                inline=False
+            )
+
+        if action_items:
+            embed.add_field(
+                name="📝 Action Items",
+                value="\n".join([f"• {a[:100]}" for a in action_items[:4]]),
+                inline=False
+            )
+
+        embed.set_footer(text="Learnings saved to knowledge base")
         return embed
 
     @staticmethod

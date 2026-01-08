@@ -58,6 +58,9 @@ from discord_embeds import RALPHEmbeds, get_agent_emoji, get_agent_color
 # Collaboration logging for post-hoc analysis
 from collaboration_logger import get_collaboration_logger, EventType
 
+# Mission summary generation
+from mission_summary import get_summary_generator
+
 
 def setup_logging(agent_name: str, log_level: str = None) -> logging.Logger:
     """Configure logging for an agent with colored output and optional file logging."""
@@ -1240,6 +1243,63 @@ class BaseAgentBot(ABC):
                 f"**Agent**: {failed_task.assigned_to.title()}\n"
                 f"**Task**: {failed_task.description[:150]}..."
             )
+
+        @self.bot.command(name="learnings")
+        async def show_learnings(ctx: commands.Context, *, query: str = None):
+            """
+            View knowledge base learnings.
+
+            Usage:
+            - !learnings - Show knowledge base stats
+            - !learnings <query> - Search for relevant learnings
+            """
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            try:
+                from knowledge_base import get_knowledge_base
+                kb = get_knowledge_base()
+            except ImportError:
+                await ctx.reply("Knowledge base not available.")
+                return
+
+            if query:
+                # Search for relevant learnings
+                results = kb.search(query, max_results=5, min_similarity=0.1)
+                if not results:
+                    await ctx.reply(f"No learnings found matching: `{query}`")
+                    return
+
+                embed = discord.Embed(
+                    title=f"Learnings: {query[:50]}",
+                    color=discord.Color.blue()
+                )
+                for learning, score in results:
+                    embed.add_field(
+                        name=f"[{learning.category.upper()}] Score: {score:.2f}",
+                        value=learning.content[:200] + ("..." if len(learning.content) > 200 else ""),
+                        inline=False
+                    )
+                await ctx.reply(embed=embed)
+            else:
+                # Show stats
+                stats = kb.get_stats()
+                embed = discord.Embed(
+                    title="Knowledge Base Stats",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Total Learnings", value=str(stats.get("total", 0)), inline=True)
+
+                if stats.get("by_category"):
+                    cat_str = "\n".join([f"• {k}: {v}" for k, v in stats["by_category"].items()])
+                    embed.add_field(name="By Category", value=cat_str or "None", inline=True)
+
+                if stats.get("most_used"):
+                    used_str = "\n".join([f"• {txt}... ({cnt}x)" for txt, cnt in stats["most_used"][:3]])
+                    embed.add_field(name="Most Referenced", value=used_str or "None", inline=False)
+
+                await ctx.reply(embed=embed)
 
     def _register_proposal_commands(self):
         """Register commands for improvement proposals."""
@@ -2918,13 +2978,8 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     # Check if mission is now complete
                     progress = mission.get_progress()
                     if progress['completed'] == progress['total']:
-                        mission_complete_embed = RALPHEmbeds.mission_complete(
-                            mission_id=mission.mission_id,
-                            objective=mission.objective,
-                            total_tasks=progress['total'],
-                            duration_seconds=0  # Could calculate from mission start
-                        )
-                        await self.post_embed_to_team(mission_complete_embed)
+                        # Generate comprehensive executive summary
+                        await self._generate_mission_summary(mission, mission_manager)
                 else:
                     await mission_manager.update_task_status(next_task.task_id, "failed")
                     error_embed = RALPHEmbeds.agent_error(
@@ -3046,6 +3101,83 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
     async def post_to_team_channel(self, content: str) -> Optional[discord.Message]:
         """Post a message to the #ralph_team channel."""
         return await self._post_to_channel("ralph_team", content)
+
+    async def _generate_mission_summary(self, mission, mission_manager):
+        """
+        Generate and post comprehensive mission summary when all tasks complete.
+
+        Includes:
+        - Executive summary with @ mention
+        - Key findings from task outputs
+        - Suggested next steps
+        - SCRUM retrospective
+        - Learnings saved to knowledge base
+        """
+        try:
+            self.logger.info(f"Generating mission summary for {mission.mission_id}")
+
+            # Mark mission as complete
+            await mission_manager.complete_mission()
+
+            # Get the summary generator
+            summary_gen = get_summary_generator()
+
+            # Generate executive summary (uses orchestrator LLM if available)
+            summary_data = await summary_gen.generate_summary(
+                mission,
+                orchestrator=self._orchestrator
+            )
+
+            # Generate retrospective
+            retro_data = await summary_gen.generate_retrospective(
+                mission,
+                orchestrator=self._orchestrator
+            )
+
+            # Get owner mention (from mission creator)
+            owner_mention = mission.created_by if hasattr(mission, 'created_by') else None
+
+            # Post executive summary embeds
+            summary_embeds = RALPHEmbeds.executive_summary(
+                mission_id=mission.mission_id,
+                mission_objective=mission.objective,
+                total_tasks=len(mission.tasks),
+                duration_minutes=summary_data.get("stats", {}).get("duration_minutes", 0),
+                key_findings=summary_data.get("key_findings", []),
+                work_summary=summary_data.get("work_summary", ""),
+                suggestions=summary_data.get("suggestions", []),
+                owner_mention=owner_mention
+            )
+
+            for embed in summary_embeds:
+                await self.post_embed_to_team(embed)
+
+            # Post retrospective
+            retro_embed = RALPHEmbeds.retrospective(
+                mission_id=mission.mission_id,
+                what_went_well=retro_data.get("what_went_well", []),
+                what_could_improve=retro_data.get("what_could_improve", []),
+                learnings=retro_data.get("learnings", []),
+                action_items=retro_data.get("action_items", [])
+            )
+            await self.post_embed_to_team(retro_embed)
+
+            # Post a mention for the owner
+            if owner_mention:
+                await self.post_to_team_channel(
+                    f"<@{owner_mention}> Mission **{mission.mission_id}** complete! "
+                    f"Review the summary above and let me know if you'd like to start a follow-up mission."
+                )
+
+            self.logger.info(f"Mission summary posted for {mission.mission_id}")
+
+        except Exception as e:
+            self.logger.exception(f"Failed to generate mission summary: {e}")
+            # Fallback to simple completion message
+            await self.post_to_team_channel(
+                f"**Mission {mission.mission_id} Complete!**\n"
+                f"All {len(mission.tasks)} tasks finished. Check task outputs for details."
+            )
 
     async def _check_mission_to_resume(self):
         """

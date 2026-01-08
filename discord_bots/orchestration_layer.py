@@ -12,7 +12,7 @@ Token Savings Strategy:
 - Context Summarization: Compress long contexts before passing to Claude
 
 Supported Models:
-- OpenAI: gpt-4o-mini (~$0.15/1M input, $0.60/1M output)
+- OpenAI: gpt-5-mini (cheaper and better than gpt-4o-mini)
 - Anthropic: claude-3-haiku (~$0.25/1M input, $1.25/1M output)
 - Local: Pattern matching for very simple tasks (free)
 """
@@ -393,7 +393,7 @@ class OrchestrationLayer:
         if provider is None:
             if self._openai_key:
                 provider = OrchestratorProvider.OPENAI
-                model = model or "gpt-4o-mini"
+                model = model or "gpt-5-mini"
             elif os.getenv("ANTHROPIC_API_KEY"):
                 provider = OrchestratorProvider.ANTHROPIC
                 model = model or "claude-3-haiku-20240307"
