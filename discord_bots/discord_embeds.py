@@ -209,9 +209,14 @@ class RALPHEmbeds:
             )
 
             for i, task_desc in enumerate(agent_tasks[:5], 1):
-                # Truncate long descriptions
-                if len(task_desc) > 200:
-                    task_desc = task_desc[:200] + "..."
+                # Truncate long descriptions at word boundary (Discord limit is 1024)
+                max_len = 500
+                if len(task_desc) > max_len:
+                    # Find last space before limit to avoid cutting mid-word
+                    truncate_at = task_desc.rfind(' ', 0, max_len)
+                    if truncate_at == -1:
+                        truncate_at = max_len
+                    task_desc = task_desc[:truncate_at] + "..."
                 embed.add_field(
                     name=f"Task {i}",
                     value=task_desc,
@@ -277,7 +282,7 @@ class RALPHEmbeds:
         """Create embed for agent task completion with support for longer outputs."""
         emoji = get_agent_emoji(agent_type)
         color = get_agent_color(agent_type)
-        title = AGENT_TITLES.get(agent_type, agent_type.title())
+        title = get_agent_title(agent_type)
 
         # Build header with task info
         header = f"**Task:** {task_description[:150]}" if task_description else ""
