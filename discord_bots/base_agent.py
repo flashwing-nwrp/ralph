@@ -283,17 +283,21 @@ class BaseAgentBot(ABC):
             # CHANNEL-BASED COMMAND ROUTING
             # Prevents all bots from responding to the same command
             # =========================================================
-            channel_name = message.channel.name if hasattr(message.channel, 'name') else ""
+            channel_id = message.channel.id
+            channel_name = message.channel.name.lower() if hasattr(message.channel, 'name') else ""
             should_process_commands = False
 
+            # Get team channel ID from env
+            team_channel_id = int(os.getenv("CHANNEL_RALPH_TEAM", "0"))
+
             # Team channel: Only Strategy Agent handles commands (mission lead)
-            if channel_name == "ralph-team":
+            if channel_id == team_channel_id or "ralph" in channel_name:
                 if self.agent_type == "strategy":
                     should_process_commands = True
                 # Other bots still listen for @mentions in team channel
 
             # Agent-specific channels: Only that agent responds
-            elif channel_name == self.primary_channel_name:
+            elif channel_name == self.primary_channel_name or self.primary_channel_name in channel_name:
                 should_process_commands = True
 
             # Other channels (bot-logs, error-logs, etc): No command processing
