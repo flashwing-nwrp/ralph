@@ -1,196 +1,378 @@
-# Ralph
+# RALPH - Autonomous AI Agent Ensemble
 
 ![Ralph](ralph.webp)
 
-Ralph is an autonomous AI agent loop that runs [Amp](https://ampcode.com) repeatedly until all PRD items are complete. Each iteration is a fresh Amp instance with clean context. Memory persists via git history, `progress.txt`, and `prd.json`.
+RALPH (Reinforced Autonomous Learning & Processing Hub) is a Discord-based multi-agent AI system designed to autonomously develop, test, and optimize trading strategies for the Polymarket AI trading bot.
 
-Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
-
-[Read my in-depth article on how I use Ralph](https://x.com/ryancarson/status/2008548371712135632)
-
-## Prerequisites
-
-- [Amp CLI](https://ampcode.com) installed and authenticated
-- `jq` installed (`brew install jq` on macOS)
-- A git repository for your project
-
-## Setup
-
-### Option 1: Copy to your project
-
-Copy the ralph files into your project:
-
-```bash
-# From your project root
-mkdir -p scripts/ralph
-cp /path/to/ralph/ralph.sh scripts/ralph/
-cp /path/to/ralph/prompt.md scripts/ralph/
-chmod +x scripts/ralph/ralph.sh
-```
-
-### Option 2: Install skills globally
-
-Copy the skills to your Amp config for use across all projects:
-
-```bash
-cp -r skills/prd ~/.config/amp/skills/
-cp -r skills/ralph ~/.config/amp/skills/
-```
-
-### Configure Amp auto-handoff (recommended)
-
-Add to `~/.config/amp/settings.json`:
-
-```json
-{
-  "amp.experimental.autoHandoff": { "context": 90 }
-}
-```
-
-This enables automatic handoff when context fills up, allowing Ralph to handle large stories that exceed a single context window.
-
-## Workflow
-
-### 1. Create a PRD
-
-Use the PRD skill to generate a detailed requirements document:
-
-```
-Load the prd skill and create a PRD for [your feature description]
-```
-
-Answer the clarifying questions. The skill saves output to `tasks/prd-[feature-name].md`.
-
-### 2. Convert PRD to Ralph format
-
-Use the Ralph skill to convert the markdown PRD to JSON:
-
-```
-Load the ralph skill and convert tasks/prd-[feature-name].md to prd.json
-```
-
-This creates `prd.json` with user stories structured for autonomous execution.
-
-### 3. Run Ralph
-
-```bash
-./scripts/ralph/ralph.sh [max_iterations]
-```
-
-Default is 10 iterations.
-
-Ralph will:
-1. Create a feature branch (from PRD `branchName`)
-2. Pick the highest priority story where `passes: false`
-3. Implement that single story
-4. Run quality checks (typecheck, tests)
-5. Commit if checks pass
-6. Update `prd.json` to mark story as `passes: true`
-7. Append learnings to `progress.txt`
-8. Repeat until all stories pass or max iterations reached
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `ralph.sh` | The bash loop that spawns fresh Amp instances |
-| `prompt.md` | Instructions given to each Amp instance |
-| `prd.json` | User stories with `passes` status (the task list) |
-| `prd.json.example` | Example PRD format for reference |
-| `progress.txt` | Append-only learnings for future iterations |
-| `skills/prd/` | Skill for generating PRDs |
-| `skills/ralph/` | Skill for converting PRDs to JSON |
-| `flowchart/` | Interactive visualization of how Ralph works |
-
-## Flowchart
+Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/), extended into a collaborative agent ensemble with Claude Code integration.
 
 [![Ralph Flowchart](ralph-flowchart.png)](https://snarktank.github.io/ralph/)
 
-**[View Interactive Flowchart](https://snarktank.github.io/ralph/)** - Click through to see each step with animations.
+**[View Interactive Flowchart](https://snarktank.github.io/ralph/)**
 
-The `flowchart/` directory contains the source code. To run locally:
+## Overview
 
-```bash
-cd flowchart
-npm install
-npm run dev
+RALPH consists of 5 specialized AI agents that collaborate through Discord, each with distinct expertise:
+
+| Agent | Role | Personality |
+|-------|------|-------------|
+| **Strategy Agent** | Mission Lead & Trading Logic | "The Visionary" - Creative, big-picture thinker |
+| **Tuning Agent** | Parameter Optimization | "The Perfectionist" - Meticulous, data-driven |
+| **Backtest Agent** | Simulation & Validation | "The Skeptic" - Evidence-based, thorough |
+| **Risk Agent** | Safety & Compliance | "The Guardian" - Cautious, protective (has VETO power) |
+| **Data Agent** | Data Pipeline & Preprocessing | "The Librarian" - Methodical, detail-oriented |
+
+## Key Features
+
+### Mission System
+Set high-level goals via Discord. The Strategy Agent breaks them into tasks and delegates to appropriate agents.
+
+```
+!mission Improve the momentum strategy Sharpe ratio by 20%
 ```
 
-## Critical Concepts
+### SCRUM Methodology
+Built-in agile workflow with sprints, backlog, user stories, and retrospectives.
 
-### Each Iteration = Fresh Context
-
-Each iteration spawns a **new Amp instance** with clean context. The only memory between iterations is:
-- Git history (commits from previous iterations)
-- `progress.txt` (learnings and context)
-- `prd.json` (which stories are done)
-
-### Small Tasks
-
-Each PRD item should be small enough to complete in one context window. If a task is too big, the LLM runs out of context before finishing and produces poor code.
-
-Right-sized stories:
-- Add a database column and migration
-- Add a UI component to an existing page
-- Update a server action with new logic
-- Add a filter dropdown to a list
-
-Too big (split these):
-- "Build the entire dashboard"
-- "Add authentication"
-- "Refactor the API"
-
-### AGENTS.md Updates Are Critical
-
-After each iteration, Ralph updates the relevant `AGENTS.md` files with learnings. This is key because Amp automatically reads these files, so future iterations (and future human developers) benefit from discovered patterns, gotchas, and conventions.
-
-Examples of what to add to AGENTS.md:
-- Patterns discovered ("this codebase uses X for Y")
-- Gotchas ("do not forget to update Z when changing W")
-- Useful context ("the settings panel is in component X")
-
-### Feedback Loops
-
-Ralph only works if there are feedback loops:
-- Typecheck catches type errors
-- Tests verify behavior
-- CI must stay green (broken code compounds across iterations)
-
-### Browser Verification for UI Stories
-
-Frontend stories must include "Verify in browser using dev-browser skill" in acceptance criteria. Ralph will use the dev-browser skill to navigate to the page, interact with the UI, and confirm changes work.
-
-### Stop Condition
-
-When all stories have `passes: true`, Ralph outputs `<promise>COMPLETE</promise>` and the loop exits.
-
-## Debugging
-
-Check current state:
-
-```bash
-# See which stories are done
-cat prd.json | jq '.userStories[] | {id, title, passes}'
-
-# See learnings from previous iterations
-cat progress.txt
-
-# Check git history
-git log --oneline -10
+```
+!sprint create Q1 Optimization | Improve core strategy metrics
+!story add Implement adaptive learning rate | Auto-tune based on market regime | improvement | 5
+!standup
 ```
 
-## Customizing prompt.md
+### Self-Improvement Proposals
+Agents can propose system improvements during their work, queued for operator review.
 
-Edit `prompt.md` to customize Ralph's behavior for your project:
-- Add project-specific quality check commands
-- Include codebase conventions
-- Add common gotchas for your stack
+```
+!propose accuracy high Model predictions biased | Add isotonic calibration | Reduce bias by 15%
+!proposals
+!approve IMP-0001
+```
 
-## Archiving
+### Production-Ready Operations (P0/P1/P2)
 
-Ralph automatically archives previous runs when you start a new feature (different `branchName`). Archives are saved to `archive/YYYY-MM-DD-feature-name/`.
+#### P0 Critical Systems
+- **Emergency Controls**: Kill switch, circuit breakers, trading halt/resume
+- **Real-time Monitoring**: Dashboards, threshold alerts, metric tracking
+- **Decision Logging**: Complete audit trail with integrity verification
+
+#### P1 Important Systems
+- **Model Lifecycle**: Version registry, deployment, rollback, shadow mode
+- **Data Quality**: Freshness, completeness, outlier detection, drift monitoring
+
+#### P2 Operational Systems
+- **Task Scheduler**: Cron-like scheduling for automated operations
+- **Testing Framework**: Unit, integration, simulation, and regression tests
+- **Context Persistence**: Agent memory, sessions, cross-agent context sharing
+
+## Discord Commands
+
+### Core Commands
+| Command | Description |
+|---------|-------------|
+| `!mission <goal>` | Set a new mission for the agent ensemble |
+| `!mission_status` | Check current mission progress |
+| `!do <task>` | Execute a task using Claude Code |
+| `!handoff <agent> <task>` | Hand off a task to another agent |
+| `!ask <question>` | Ask the agent a question |
+
+### Emergency Controls (P0)
+| Command | Description |
+|---------|-------------|
+| `!killswitch [reason]` | HALT all trading immediately |
+| `!halt [reason]` | Pause trading (less severe) |
+| `!resume_trading [notes]` | Resume after halt/kill |
+| `!trading_status` | Check trading system status |
+| `!circuit_breakers` | View circuit breaker config |
+
+### Monitoring & Alerts (P0)
+| Command | Description |
+|---------|-------------|
+| `!dashboard` | View monitoring dashboard |
+| `!alerts [limit]` | Show active alerts |
+| `!ack <alert_id>` | Acknowledge an alert |
+| `!resolve <alert_id> [notes]` | Resolve an alert |
+
+### Decision Logging (P0/P1)
+| Command | Description |
+|---------|-------------|
+| `!decisions [limit]` | Show recent decision log |
+| `!decision <id>` | View decision details |
+| `!trading_summary [days]` | Trading decision summary |
+
+### Model Management (P1)
+| Command | Description |
+|---------|-------------|
+| `!models` | Show model registry |
+| `!model <id> [version]` | View model details |
+| `!deploy_model <id> <version>` | Deploy model to production |
+| `!rollback_model <id> <version>` | Rollback to previous version |
+| `!training [model_id]` | Show training history |
+
+### Data Quality (P1)
+| Command | Description |
+|---------|-------------|
+| `!data_quality` | View data quality dashboard |
+| `!data_source <source>` | Check specific data source |
+| `!quality_history [source]` | View quality check history |
+
+### SCRUM Commands
+| Command | Description |
+|---------|-------------|
+| `!story add <title> \| <desc> \| <type> \| <points>` | Create a user story |
+| `!backlog` | View product backlog |
+| `!sprint create <name> \| <goal>` | Create a new sprint |
+| `!sprint start` | Start the sprint |
+| `!sprint board` | View sprint board |
+| `!sprint end` | End current sprint |
+| `!standup` | Daily standup summary |
+| `!velocity` | Team velocity report |
+
+### Proposals
+| Command | Description |
+|---------|-------------|
+| `!propose <cat> <priority> <problem> \| <solution> \| <impact>` | Submit improvement proposal |
+| `!proposals` | View pending proposals |
+| `!approve <id> [notes]` | Approve a proposal |
+| `!reject <id> [reason]` | Reject a proposal |
+| `!defer <id> [reason]` | Defer for later |
+
+### Scheduler (P2)
+| Command | Description |
+|---------|-------------|
+| `!schedule` | Show scheduled tasks |
+| `!task_detail <id>` | View task details |
+| `!run_task <id>` | Run task immediately |
+| `!pause_task <id>` | Pause a scheduled task |
+| `!resume_task <id>` | Resume paused task |
+
+### Testing (P2)
+| Command | Description |
+|---------|-------------|
+| `!tests` | Show test summary |
+| `!test <id>` | View test details |
+| `!run_test <id>` | Run specific test |
+| `!run_tests [type]` | Run all tests |
+| `!test_results [run_id]` | View test results |
+
+### Context/Memory (P2)
+| Command | Description |
+|---------|-------------|
+| `!context` | View context store summary |
+| `!agent_memory [agent]` | Show agent's memory |
+| `!share_context <key> <value>` | Share context with agents |
+| `!sessions` | Show active sessions |
+
+### VPS Deployment
+| Command | Description |
+|---------|-------------|
+| `!deploy` | Deploy latest code to VPS |
+| `!vps` | Check VPS status |
+| `!logs [lines]` | Get VPS logs |
+| `!restart` | Restart VPS service |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Discord Server                            │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   │
+│  │Strategy │ │ Tuning  │ │Backtest │ │  Risk   │ │  Data   │   │
+│  │  Agent  │ │  Agent  │ │  Agent  │ │  Agent  │ │  Agent  │   │
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘   │
+│       │           │           │           │           │         │
+│       └───────────┴───────────┼───────────┴───────────┘         │
+│                               │                                  │
+│                    ┌──────────┴──────────┐                      │
+│                    │  Agent Coordinator   │                      │
+│                    │  (Handoff Queue)     │                      │
+│                    └──────────┬──────────┘                      │
+└───────────────────────────────┼─────────────────────────────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │    Claude Executor     │
+                    │   (Claude Code CLI)    │
+                    └───────────┬───────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+┌───────┴───────┐     ┌────────┴────────┐     ┌───────┴───────┐
+│ Polymarket AI │     │   MySQL/TAAPI   │     │  Coinbase/    │
+│    Bot Code   │     │   Indicators    │     │   Binance WS  │
+└───────────────┘     └─────────────────┘     └───────────────┘
+```
+
+## Project Knowledge
+
+RALPH includes comprehensive knowledge about the Polymarket AI Bot:
+
+- **MySQL Database**: Candle storage schema, query patterns
+- **TAAPI.io Integration**: 100+ technical indicators
+- **WebSocket Data**: Real-time feeds from Coinbase/Binance
+- **Experimentation Framework**: Grid search, Bayesian optimization, walk-forward analysis
+
+## Setup
+
+### Prerequisites
+
+- Python 3.10+
+- Discord Bot tokens (5 bots, one per agent)
+- Claude API key (for Claude Code execution)
+- Discord server with appropriate channels
+
+### Environment Variables
+
+Create a `.env` file:
+
+```env
+# Discord
+DISCORD_GUILD_ID=your_guild_id
+OWNER_USER_ID=your_user_id
+
+# Agent Bot Tokens
+TUNING_BOT_TOKEN=...
+BACKTEST_BOT_TOKEN=...
+RISK_BOT_TOKEN=...
+STRATEGY_BOT_TOKEN=...
+DATA_BOT_TOKEN=...
+
+# Claude Code
+ANTHROPIC_API_KEY=...
+CLAUDE_MODEL=claude-sonnet-4-20250514
+
+# Project
+RALPH_PROJECT_DIR=/path/to/polymarket-ai-bot
+POLYMARKET_PROJECT_DIR=/path/to/polymarket-ai-bot
+
+# VPS (optional)
+VPS_HOST=...
+VPS_USER=...
+VPS_SSH_KEY_PATH=...
+```
+
+### Discord Server Setup
+
+Create these channels:
+- `#ralph-team` - Team coordination
+- `#tuning` - Tuning Agent primary
+- `#backtesting` - Backtest Agent primary
+- `#risk` - Risk Agent primary
+- `#strategy` - Strategy Agent primary
+- `#data` - Data Agent primary
+- `#bot-logs` - Bot status messages
+- `#error-logs` - Error notifications
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/flashwing-nwrp/ralph.git
+cd ralph
+
+# Install dependencies
+pip install -r discord_bots/requirements.txt
+
+# Run all agents
+python discord_bots/run_all.py
+```
+
+## File Structure
+
+```
+ralph/
+├── discord_bots/
+│   ├── base_agent.py          # Base class for all agents
+│   ├── claude_executor.py     # Claude Code integration
+│   ├── agent_prompts.py       # Agent role definitions
+│   ├── project_knowledge.py   # Polymarket AI Bot knowledge
+│   │
+│   ├── # Agent Implementations
+│   ├── tuning_agent.py
+│   ├── backtest_agent.py
+│   ├── risk_agent.py
+│   ├── strategy_agent.py
+│   ├── data_agent.py
+│   │
+│   ├── # Mission & Workflow
+│   ├── mission_manager.py     # Mission tracking
+│   ├── scrum_manager.py       # SCRUM methodology
+│   ├── improvement_proposals.py
+│   │
+│   ├── # P0 Critical Systems
+│   ├── emergency_controls.py  # Kill switch, circuit breakers
+│   ├── monitoring_alerts.py   # Dashboards, alerts
+│   ├── decision_logger.py     # Audit trail
+│   │
+│   ├── # P1 Important Systems
+│   ├── model_lifecycle.py     # Model versioning
+│   ├── data_quality.py        # Data monitoring
+│   │
+│   ├── # P2 Operational Systems
+│   ├── scheduler.py           # Task scheduling
+│   ├── testing_framework.py   # Test management
+│   ├── context_persistence.py # Agent memory
+│   │
+│   ├── vps_deployer.py        # VPS deployment
+│   ├── autonomous_orchestrator.py
+│   └── run_all.py             # Launch all agents
+│
+├── flowchart/                 # Interactive visualization
+├── skills/                    # Amp skills (original Ralph)
+└── README.md
+```
+
+## Workflow Example
+
+1. **Operator sets mission**:
+   ```
+   !mission Improve win rate on high-volatility markets by 15%
+   ```
+
+2. **Strategy Agent plans**:
+   - Breaks down into tasks
+   - Creates sprint with user stories
+   - Delegates to appropriate agents
+
+3. **Agents collaborate**:
+   - Data Agent prepares features
+   - Tuning Agent optimizes parameters
+   - Backtest Agent validates changes
+   - Risk Agent audits safety
+
+4. **Agents propose improvements**:
+   ```
+   !propose accuracy high Calibration drift detected | Implement online recalibration | Maintain prediction accuracy
+   ```
+
+5. **Operator reviews and approves**:
+   ```
+   !proposals
+   !approve IMP-0001
+   ```
+
+6. **Deployment**:
+   ```
+   !deploy
+   ```
+
+## Safety Features
+
+- **Kill Switch**: Immediate halt via `!killswitch`
+- **Circuit Breakers**: Auto-halt on drawdown (15%), loss streaks (5), volatility spikes (3x)
+- **Risk Agent Veto**: Risk Agent can reject any strategy that fails safety audit
+- **Complete Audit Trail**: All decisions logged with checksums
+- **Model Rollback**: Instant rollback to previous model versions
+
+## Original Ralph Pattern
+
+The original Ralph pattern (for Amp CLI) is still available in the `scripts/` and `skills/` directories. See [AGENTS.md](AGENTS.md) for details on the autonomous iteration loop.
 
 ## References
 
 - [Geoffrey Huntley's Ralph article](https://ghuntley.com/ralph/)
 - [Amp documentation](https://ampcode.com/manual)
+- [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-code)
+
+## License
+
+MIT
