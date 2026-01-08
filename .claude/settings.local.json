@@ -22,7 +22,9 @@
       "Bash(grep:*)",
       "Bash(python:*)",
       "Bash(timeout 15 python:*)",
-      "Bash(timeout 20 python:*)"
+      "Bash(timeout 20 python:*)",
+      "Bash(timeout 25 python:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

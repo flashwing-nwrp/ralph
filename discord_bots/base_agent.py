@@ -279,8 +279,29 @@ class BaseAgentBot(ABC):
             if message.guild.id != self.guild_id:
                 return
 
-            # Process commands first
-            await self.bot.process_commands(message)
+            # =========================================================
+            # CHANNEL-BASED COMMAND ROUTING
+            # Prevents all bots from responding to the same command
+            # =========================================================
+            channel_name = message.channel.name if hasattr(message.channel, 'name') else ""
+            should_process_commands = False
+
+            # Team channel: Only Strategy Agent handles commands (mission lead)
+            if channel_name == "ralph-team":
+                if self.agent_type == "strategy":
+                    should_process_commands = True
+                # Other bots still listen for @mentions in team channel
+
+            # Agent-specific channels: Only that agent responds
+            elif channel_name == self.primary_channel_name:
+                should_process_commands = True
+
+            # Other channels (bot-logs, error-logs, etc): No command processing
+            # but @mentions still work
+
+            # Process commands only if this bot should handle this channel
+            if should_process_commands:
+                await self.bot.process_commands(message)
 
             # Check if this is a message from another RALPH bot mentioning us
             if self._bot_registry.is_ralph_bot(message.author.id):
