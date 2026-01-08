@@ -13,7 +13,11 @@
       "Bash(git remote set-url:*)",
       "Bash(git fetch:*)",
       "Bash(git reset:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(git rebase:*)",
+      "Bash(git stash:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(ssh:*)"
     ]
   }
 }
