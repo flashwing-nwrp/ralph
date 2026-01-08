@@ -1006,10 +1006,16 @@ class BaseAgentBot(ABC):
                 mission_objective=objective,
                 initiated_by=str(ctx.author)
             )
-            await ctx.reply(embed=start_embed)
 
-            # Notify the team with embed
-            await self.post_embed_to_team(start_embed)
+            # Post to team channel (avoid duplicate if command was in team channel)
+            team_channel = await self._get_team_channel()
+            if team_channel and ctx.channel.id == team_channel.id:
+                # Command was in team channel - just reply there
+                await ctx.reply(embed=start_embed)
+            else:
+                # Command was elsewhere - reply and notify team
+                await ctx.reply(embed=start_embed)
+                await self.post_embed_to_team(start_embed)
 
             # Use ConversationalMissionManager to drive the planning
             project_dir = os.getenv("RALPH_PROJECT_DIR", "E:\\Polymarket AI Bot")
@@ -3101,6 +3107,26 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
     async def post_to_team_channel(self, content: str) -> Optional[discord.Message]:
         """Post a message to the #ralph_team channel."""
         return await self._post_to_channel("ralph_team", content)
+
+    async def _get_team_channel(self) -> Optional[discord.TextChannel]:
+        """Get the team channel object for comparison."""
+        guild = self.bot.get_guild(self.guild_id)
+        if not guild:
+            return None
+
+        # Try by name first
+        channel = discord.utils.get(guild.text_channels, name="ralph_team")
+
+        # Fallback to ID
+        if not channel:
+            channel_id_str = os.getenv("CHANNEL_RALPH_TEAM")
+            if channel_id_str:
+                try:
+                    channel = guild.get_channel(int(channel_id_str))
+                except ValueError:
+                    pass
+
+        return channel
 
     async def _generate_mission_summary(self, mission, mission_manager):
         """
