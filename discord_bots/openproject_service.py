@@ -743,6 +743,66 @@ class OpenProjectService:
             "url": f"{self.base_url}/projects/{self.project_identifier}/work_packages"
         }
 
+    def get_ralph_task_id(self, wp_id: int) -> Optional[str]:
+        """Get RALPH task ID from OpenProject work package ID."""
+        return self.wp_to_task.get(wp_id)
+
+    def get_wp_id(self, task_id: str) -> Optional[int]:
+        """Get OpenProject work package ID from RALPH task ID."""
+        return self.task_to_wp.get(task_id)
+
+    async def get_task_for_execution(self, wp_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get task details from OpenProject WP for execution.
+
+        Returns dict with:
+        - wp_id: OpenProject work package ID
+        - ralph_task_id: Linked RALPH task ID (if any)
+        - subject: Task title
+        - description: Task description (raw markdown)
+        - agent: Assigned agent type
+        - status: Current status
+        - priority: Priority level
+        """
+        wp = await self.get_work_package(wp_id)
+        if not wp:
+            return None
+
+        # Determine agent from assignee
+        agent = None
+        if wp.assignee:
+            # Reverse lookup agent type from user ID
+            for agent_type, user_id in self.AGENT_USER_IDS.items():
+                if str(user_id) in wp.assignee or agent_type in wp.assignee.lower():
+                    agent = agent_type
+                    break
+
+        # Extract RALPH task ID from description if present
+        ralph_task_id = self.wp_to_task.get(wp_id)
+        if not ralph_task_id and wp.description:
+            import re
+            match = re.search(r'\*\*RALPH Task ID:\*\*\s*(\S+)', wp.description)
+            if match:
+                ralph_task_id = match.group(1)
+
+        return {
+            "wp_id": wp_id,
+            "ralph_task_id": ralph_task_id,
+            "subject": wp.subject,
+            "description": wp.description,
+            "agent": agent,
+            "status": wp.status_name,
+            "priority": wp.priority_name,
+            "type": wp.type_name
+        }
+
+    def link_task_to_wp(self, task_id: str, wp_id: int):
+        """Manually link a RALPH task ID to an OpenProject WP."""
+        self.task_to_wp[task_id] = wp_id
+        self.wp_to_task[wp_id] = task_id
+        self._save_mappings()
+        logger.info(f"Linked RALPH task {task_id} to OpenProject WP #{wp_id}")
+
     async def test_connection(self) -> Dict[str, Any]:
         """Test the OpenProject connection and return status."""
         try:

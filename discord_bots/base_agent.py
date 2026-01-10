@@ -4314,6 +4314,253 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             else:
                 await ctx.reply(f"❌ Failed to update work package #{wp_id}")
 
+        @self.bot.command(name="wp")
+        async def view_work_package(ctx: commands.Context, wp_id: str = None):
+            """
+            View details of an OpenProject work package.
+
+            Usage: !wp 55
+            Shows task details and linked RALPH task ID.
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not wp_id:
+                await ctx.reply("Usage: `!wp <work_package_id>`\nExample: `!wp 55`")
+                return
+
+            try:
+                wp_id_int = int(wp_id)
+            except ValueError:
+                await ctx.reply("Work package ID must be a number.")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            task_info = await service.get_task_for_execution(wp_id_int)
+
+            if not task_info:
+                await ctx.reply(f"❌ Work package #{wp_id} not found.")
+                return
+
+            embed = discord.Embed(
+                title=f"WP #{wp_id}: {task_info['subject'][:60]}",
+                color=0x3498DB,
+                timestamp=datetime.utcnow()
+            )
+
+            embed.add_field(name="Type", value=task_info.get("type", "Task"), inline=True)
+            embed.add_field(name="Status", value=task_info.get("status", "New"), inline=True)
+            embed.add_field(name="Priority", value=task_info.get("priority", "Normal"), inline=True)
+
+            if task_info.get("agent"):
+                embed.add_field(name="Assigned Agent", value=task_info["agent"].title(), inline=True)
+
+            if task_info.get("ralph_task_id"):
+                embed.add_field(name="RALPH Task ID", value=f"`{task_info['ralph_task_id']}`", inline=True)
+            else:
+                embed.add_field(name="RALPH Task ID", value="*Not linked*", inline=True)
+
+            # Truncate description
+            desc = task_info.get("description", "")[:500]
+            if desc:
+                embed.add_field(name="Description", value=desc, inline=False)
+
+            embed.add_field(
+                name="Actions",
+                value=f"`!run_wp {wp_id}` - Execute this task\n`!link_wp {wp_id} <task_id>` - Link to RALPH task",
+                inline=False
+            )
+
+            board_url = f"{service.base_url}/work_packages/{wp_id}"
+            embed.add_field(name="Link", value=f"[Open in Browser]({board_url})", inline=False)
+
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="run_wp")
+        async def run_work_package(ctx: commands.Context, wp_id: str = None):
+            """
+            Execute an OpenProject work package as a RALPH task.
+
+            Usage: !run_wp 55
+            The work package will be assigned to the appropriate agent based on assignee.
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can execute work packages.")
+                return
+
+            if not wp_id:
+                await ctx.reply("Usage: `!run_wp <work_package_id>`\nExample: `!run_wp 55`")
+                return
+
+            try:
+                wp_id_int = int(wp_id)
+            except ValueError:
+                await ctx.reply("Work package ID must be a number.")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            task_info = await service.get_task_for_execution(wp_id_int)
+
+            if not task_info:
+                await ctx.reply(f"❌ Work package #{wp_id} not found.")
+                return
+
+            # Determine target agent
+            target_agent = task_info.get("agent")
+            if not target_agent:
+                await ctx.reply(
+                    f"⚠️ Work package #{wp_id} has no assigned agent.\n"
+                    f"Assign it in OpenProject or use `!run_wp_as {wp_id} <agent>`"
+                )
+                return
+
+            # Build task description
+            task_desc = f"[OpenProject WP #{wp_id}] {task_info['subject']}"
+            if task_info.get("description"):
+                # Clean up markdown for task
+                desc_clean = task_info["description"][:1000]
+                task_desc = f"{task_desc}\n\n{desc_clean}"
+
+            # Add to mission manager as a new task
+            manager = get_mission_manager()
+
+            # Create or get mission
+            if not manager.current_mission:
+                await ctx.reply(f"⚠️ No active mission. Creating one for WP #{wp_id}...")
+                mission = await manager.create_mission(
+                    objective=f"Execute OpenProject work package #{wp_id}",
+                    created_by=str(ctx.author)
+                )
+
+            # Add task
+            task = await manager.add_task_to_mission(
+                description=task_desc,
+                assigned_to=target_agent,
+                priority=task_info.get("priority", "normal").lower()
+            )
+
+            # Link task to WP
+            service.link_task_to_wp(task.task_id, wp_id_int)
+
+            # Update WP status to In Progress
+            await service.update_work_package(wp_id=wp_id_int, status_name="In progress")
+
+            await ctx.reply(
+                f"▶️ **Executing WP #{wp_id}**\n"
+                f"Task ID: `{task.task_id}`\n"
+                f"Agent: {target_agent.title()}\n"
+                f"Title: {task_info['subject'][:60]}\n\n"
+                f"Use `!mission_status` to track progress."
+            )
+
+        @self.bot.command(name="run_wp_as")
+        async def run_work_package_as(ctx: commands.Context, wp_id: str = None, agent: str = None):
+            """
+            Execute an OpenProject work package with a specific agent.
+
+            Usage: !run_wp_as 55 backtest
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can execute work packages.")
+                return
+
+            if not wp_id or not agent:
+                await ctx.reply(
+                    "Usage: `!run_wp_as <work_package_id> <agent>`\n"
+                    "Example: `!run_wp_as 55 backtest`\n"
+                    "Agents: tuning, backtest, risk, strategy, data"
+                )
+                return
+
+            valid_agents = ["tuning", "backtest", "risk", "strategy", "data"]
+            if agent.lower() not in valid_agents:
+                await ctx.reply(f"Unknown agent: `{agent}`. Valid: {', '.join(valid_agents)}")
+                return
+
+            try:
+                wp_id_int = int(wp_id)
+            except ValueError:
+                await ctx.reply("Work package ID must be a number.")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            task_info = await service.get_task_for_execution(wp_id_int)
+
+            if not task_info:
+                await ctx.reply(f"❌ Work package #{wp_id} not found.")
+                return
+
+            target_agent = agent.lower()
+
+            # Build task description
+            task_desc = f"[OpenProject WP #{wp_id}] {task_info['subject']}"
+            if task_info.get("description"):
+                desc_clean = task_info["description"][:1000]
+                task_desc = f"{task_desc}\n\n{desc_clean}"
+
+            manager = get_mission_manager()
+
+            if not manager.current_mission:
+                mission = await manager.create_mission(
+                    objective=f"Execute OpenProject work package #{wp_id}",
+                    created_by=str(ctx.author)
+                )
+
+            task = await manager.add_task_to_mission(
+                description=task_desc,
+                assigned_to=target_agent,
+                priority=task_info.get("priority", "normal").lower()
+            )
+
+            service.link_task_to_wp(task.task_id, wp_id_int)
+            await service.update_work_package(wp_id=wp_id_int, status_name="In progress")
+
+            await ctx.reply(
+                f"▶️ **Executing WP #{wp_id}** as {target_agent.title()} Agent\n"
+                f"Task ID: `{task.task_id}`\n"
+                f"Title: {task_info['subject'][:60]}\n\n"
+                f"Use `!mission_status` to track progress."
+            )
+
+        @self.bot.command(name="link_wp")
+        async def link_work_package(ctx: commands.Context, wp_id: str = None, task_id: str = None):
+            """
+            Manually link a RALPH task ID to an OpenProject work package.
+
+            Usage: !link_wp 55 M-0014-T01
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not wp_id or not task_id:
+                await ctx.reply("Usage: `!link_wp <wp_id> <ralph_task_id>`\nExample: `!link_wp 55 M-0014-T01`")
+                return
+
+            try:
+                wp_id_int = int(wp_id)
+            except ValueError:
+                await ctx.reply("Work package ID must be a number.")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            service.link_task_to_wp(task_id, wp_id_int)
+
+            await ctx.reply(f"✅ Linked RALPH task `{task_id}` to OpenProject WP #{wp_id}")
+
     def _register_interbot_commands(self):
         """Register commands for inter-bot communication."""
 
