@@ -423,13 +423,20 @@ class MissionManager:
 
         return task
 
-    async def complete_task(self, task_id: str, output: str = ""):
+    async def complete_task(self, task_id: str, output: str = "", agent: str = None):
         """Mark a task as completed (thread-safe for parallel execution)."""
         async with self._lock:
             if not self.current_mission:
                 return
 
             self.current_mission.complete_task(task_id, output)
+
+            # Get agent from task if not provided
+            if not agent:
+                for task in self.current_mission.tasks:
+                    if task.task_id == task_id:
+                        agent = task.assigned_to
+                        break
 
             # Add note about completion
             self.current_mission.notes.append(
@@ -438,11 +445,12 @@ class MissionManager:
 
         await self._save_current_mission()
 
-        # Sync status to OpenProject
-        await self._sync_task_status_to_openproject(task_id, "completed")
+        # Sync status to OpenProject with output as comment
+        await self._sync_task_status_to_openproject(task_id, "completed", output, agent)
 
-    async def update_task_status(self, task_id: str, status: str):
+    async def update_task_status(self, task_id: str, status: str, message: str = None):
         """Update a task's status (thread-safe for parallel execution)."""
+        agent = None
         async with self._lock:
             if not self.current_mission:
                 return
@@ -450,12 +458,13 @@ class MissionManager:
             for task in self.current_mission.tasks:
                 if task.task_id == task_id:
                     task.status = status
+                    agent = task.assigned_to
                     break
 
         await self._save_current_mission()
 
-        # Sync status to OpenProject
-        await self._sync_task_status_to_openproject(task_id, status)
+        # Sync status to OpenProject with optional message
+        await self._sync_task_status_to_openproject(task_id, status, message, agent)
 
     async def _sync_task_to_openproject(self, task: MissionTask):
         """Sync a task to OpenProject (creates work package)."""
@@ -478,8 +487,8 @@ class MissionManager:
         except Exception as e:
             logger.warning(f"Failed to sync task to OpenProject: {e}")
 
-    async def _sync_task_status_to_openproject(self, task_id: str, status: str):
-        """Sync task status change to OpenProject."""
+    async def _sync_task_status_to_openproject(self, task_id: str, status: str, output: str = None, agent: str = None):
+        """Sync task status change to OpenProject, optionally with output as comment."""
         if not os.getenv("OPENPROJECT_API_KEY"):
             return  # OpenProject not configured
 
@@ -487,8 +496,30 @@ class MissionManager:
             from openproject_service import get_openproject_service
             service = get_openproject_service()
 
-            await service.update_task_status(task_id, status)
-            logger.debug(f"Synced task {task_id} status to OpenProject: {status}")
+            # Get the WP ID for this task
+            wp_id = service.get_wp_id(task_id)
+            if not wp_id:
+                logger.debug(f"No OpenProject WP linked to task {task_id}")
+                return
+
+            # Add output as comment if provided
+            if output and status == "completed":
+                # Truncate if too long
+                comment_output = output[:3000] if len(output) > 3000 else output
+                comment = f"**Task Completed**\n\n{comment_output}"
+                await service.add_comment(wp_id, comment, agent)
+                logger.debug(f"Added completion comment to WP #{wp_id}")
+
+            # Update status
+            status_map = {
+                "completed": "Closed",
+                "failed": "Rejected",
+                "in_progress": "In progress",
+                "pending": "New"
+            }
+            op_status = status_map.get(status, "New")
+            await service.update_work_package(wp_id, status_name=op_status)
+            logger.debug(f"Synced task {task_id} status to OpenProject WP #{wp_id}: {op_status}")
         except Exception as e:
             logger.warning(f"Failed to sync task status to OpenProject: {e}")
 
