@@ -182,6 +182,81 @@ class Mission:
             "percent": int((completed / total) * 100) if total > 0 else 0
         }
 
+    def find_similar_completed_task(self, description: str, similarity_threshold: float = 0.7) -> Optional[MissionTask]:
+        """
+        Find a completed task with similar description to avoid duplicate work.
+
+        Uses keyword overlap to detect similarity. Returns the completed task if found.
+        """
+        # Extract keywords from new task description (words > 3 chars)
+        new_keywords = set(
+            word.lower().strip('.,;:()[]{}"\'-')
+            for word in description.split()
+            if len(word) > 3
+        )
+
+        if not new_keywords:
+            return None
+
+        for task in self.tasks:
+            if task.status != "completed":
+                continue
+
+            # Extract keywords from completed task
+            task_keywords = set(
+                word.lower().strip('.,;:()[]{}"\'-')
+                for word in task.description.split()
+                if len(word) > 3
+            )
+
+            if not task_keywords:
+                continue
+
+            # Calculate Jaccard similarity
+            intersection = len(new_keywords & task_keywords)
+            union = len(new_keywords | task_keywords)
+            similarity = intersection / union if union > 0 else 0
+
+            if similarity >= similarity_threshold:
+                return task
+
+        return None
+
+    def is_task_assigned(self, description: str, agent_type: str = None) -> bool:
+        """
+        Check if a similar task is already assigned (pending or in_progress).
+
+        Prevents duplicate handoffs for the same work.
+        """
+        # Extract key identifiers (file paths, function names, etc.)
+        import re
+        file_pattern = r'[`"\']([^`"\']+\.(py|json|txt|md))[`"\']'
+        files_in_new = set(re.findall(file_pattern, description.lower()))
+
+        for task in self.tasks:
+            if task.status not in ["pending", "in_progress"]:
+                continue
+
+            # If checking specific agent, skip others
+            if agent_type and task.assigned_to != agent_type:
+                continue
+
+            # Check file overlap
+            files_in_task = set(re.findall(file_pattern, task.description.lower()))
+            if files_in_new and files_in_task and files_in_new & files_in_task:
+                return True
+
+            # Check keyword overlap (stricter threshold for pending tasks)
+            new_keywords = set(w.lower() for w in description.split() if len(w) > 4)
+            task_keywords = set(w.lower() for w in task.description.split() if len(w) > 4)
+
+            if new_keywords and task_keywords:
+                overlap = len(new_keywords & task_keywords) / min(len(new_keywords), len(task_keywords))
+                if overlap > 0.5:
+                    return True
+
+        return False
+
 
 class MissionManager:
     """
@@ -319,11 +394,12 @@ class MissionManager:
         return self.current_mission
 
     async def start_mission(self):
-        """Mark the current mission as in progress."""
-        if self.current_mission:
-            self.current_mission.status = MissionStatus.IN_PROGRESS
-            self.current_mission.started_at = datetime.utcnow().isoformat()
-            await self._save_current_mission()
+        """Mark the current mission as in progress (thread-safe)."""
+        async with self._lock:
+            if self.current_mission:
+                self.current_mission.status = MissionStatus.IN_PROGRESS
+                self.current_mission.started_at = datetime.utcnow().isoformat()
+        await self._save_current_mission()
 
     async def add_task_to_mission(
         self,
@@ -332,39 +408,89 @@ class MissionManager:
         priority: str = "medium",
         dependencies: List[str] = None
     ) -> Optional[MissionTask]:
-        """Add a task to the current mission."""
-        if not self.current_mission:
-            logger.warning("No active mission to add task to")
-            return None
+        """Add a task to the current mission (thread-safe)."""
+        async with self._lock:
+            if not self.current_mission:
+                logger.warning("No active mission to add task to")
+                return None
 
-        task = self.current_mission.add_task(description, assigned_to, priority, dependencies)
+            task = self.current_mission.add_task(description, assigned_to, priority, dependencies)
+
         await self._save_current_mission()
+
+        # Sync to OpenProject if enabled
+        await self._sync_task_to_openproject(task)
+
         return task
 
     async def complete_task(self, task_id: str, output: str = ""):
-        """Mark a task as completed."""
-        if not self.current_mission:
-            return
+        """Mark a task as completed (thread-safe for parallel execution)."""
+        async with self._lock:
+            if not self.current_mission:
+                return
 
-        self.current_mission.complete_task(task_id, output)
+            self.current_mission.complete_task(task_id, output)
+
+            # Add note about completion
+            self.current_mission.notes.append(
+                f"[{datetime.utcnow().strftime('%H:%M:%S')}] Task {task_id} completed"
+            )
+
         await self._save_current_mission()
 
-        # Add note about completion
-        self.current_mission.notes.append(
-            f"[{datetime.utcnow().strftime('%H:%M:%S')}] Task {task_id} completed"
-        )
+        # Sync status to OpenProject
+        await self._sync_task_status_to_openproject(task_id, "completed")
 
     async def update_task_status(self, task_id: str, status: str):
-        """Update a task's status."""
-        if not self.current_mission:
-            return
+        """Update a task's status (thread-safe for parallel execution)."""
+        async with self._lock:
+            if not self.current_mission:
+                return
 
-        for task in self.current_mission.tasks:
-            if task.task_id == task_id:
-                task.status = status
-                break
+            for task in self.current_mission.tasks:
+                if task.task_id == task_id:
+                    task.status = status
+                    break
 
         await self._save_current_mission()
+
+        # Sync status to OpenProject
+        await self._sync_task_status_to_openproject(task_id, status)
+
+    async def _sync_task_to_openproject(self, task: MissionTask):
+        """Sync a task to OpenProject (creates work package)."""
+        if not os.getenv("OPENPROJECT_API_KEY"):
+            return  # OpenProject not configured
+
+        try:
+            from openproject_service import get_openproject_service
+            service = get_openproject_service()
+
+            await service.sync_task_to_openproject(
+                task_id=task.task_id,
+                description=task.description,
+                agent=task.assigned_to,
+                mission_id=self.current_mission.mission_id if self.current_mission else "",
+                status=task.status.value if hasattr(task.status, 'value') else task.status,
+                priority=task.priority if hasattr(task, 'priority') else "medium"
+            )
+            logger.debug(f"Synced task {task.task_id} to OpenProject")
+        except Exception as e:
+            logger.warning(f"Failed to sync task to OpenProject: {e}")
+
+    async def _sync_task_status_to_openproject(self, task_id: str, status: str):
+        """Sync task status change to OpenProject."""
+        if not os.getenv("OPENPROJECT_API_KEY"):
+            return  # OpenProject not configured
+
+        try:
+            from openproject_service import get_openproject_service
+            service = get_openproject_service()
+
+            await service.update_task_status(task_id, status)
+            logger.debug(f"Synced task {task_id} status to OpenProject: {status}")
+        except Exception as e:
+            logger.warning(f"Failed to sync task status to OpenProject: {e}")
 
     def get_current_mission(self) -> Optional[Mission]:
         """Get the current active mission."""
@@ -375,7 +501,7 @@ class MissionManager:
         chunks = self.get_mission_summary_chunks()
         return "\n".join(chunks)
 
-    def get_mission_summary_chunks(self, max_chunk_size: int = 1800) -> list:
+    def get_mission_summary_chunks(self, max_chunk_size: int = 1900) -> list:
         """
         Get mission summary as a list of chunks for Discord's message limit.
 
@@ -383,7 +509,7 @@ class MissionManager:
             max_chunk_size: Max characters per chunk (Discord limit is 2000)
 
         Returns:
-            List of message strings
+            List of message strings, each under max_chunk_size
         """
         if not self.current_mission:
             return ["No active mission. Use `!mission <objective>` to set one."]
@@ -391,42 +517,54 @@ class MissionManager:
         m = self.current_mission
         progress = m.get_progress()
 
-        # Header chunk
-        header = [
-            f"**Mission {m.mission_id}**: {m.objective[:200]}",
-            f"**Status**: {m.status.value}",
-            f"**Progress**: {progress['completed']}/{progress['total']} tasks ({progress['percent']}%)",
-        ]
+        # Build header - show full objective
+        objective = m.objective
+        if len(objective) > 500:
+            truncate_at = objective.rfind(' ', 0, 500)
+            if truncate_at > 400:
+                objective = objective[:truncate_at] + "..."
+            else:
+                objective = objective[:500] + "..."
 
-        chunks = ["\n".join(header)]
+        header = (
+            f"**Mission {m.mission_id}**: {objective}\n"
+            f"**Status**: {m.status.value}\n"
+            f"**Progress**: {progress['completed']}/{progress['total']} tasks ({progress['percent']}%)"
+        )
 
-        if m.tasks:
-            current_chunk = ["", "**Tasks:**"]
-            current_size = sum(len(s) for s in current_chunk)
+        # Build task lines with full descriptions (will be chunked if too long)
+        task_lines = []
+        for task in m.tasks:
+            status_icon = {
+                "pending": "⏳",
+                "in_progress": "🔄",
+                "completed": "✅",
+                "failed": "❌"
+            }.get(task.status, "❓")
 
-            for task in m.tasks:
-                status_icon = {
-                    "pending": "⏳",
-                    "in_progress": "🔄",
-                    "completed": "✅",
-                    "failed": "❌"
-                }.get(task.status, "❓")
+            # Show full description - chunking will handle overflow
+            task_lines.append(f"  {status_icon} `{task.task_id}` [{task.assigned_to}] {task.description}")
 
-                task_line = f"  {status_icon} `{task.task_id}` [{task.assigned_to}] {task.description[:80]}"
+        # Combine into chunks
+        chunks = []
+        current_content = header
 
-                # Check if adding this line would exceed the chunk size
-                if current_size + len(task_line) + 1 > max_chunk_size:
-                    # Save current chunk and start new one
-                    chunks.append("\n".join(current_chunk))
-                    current_chunk = [task_line]
-                    current_size = len(task_line)
+        if task_lines:
+            current_content += "\n\n**Tasks:**"
+
+            for line in task_lines:
+                # Check if adding this line would exceed limit
+                if len(current_content) + len(line) + 1 > max_chunk_size:
+                    # Save current chunk
+                    chunks.append(current_content)
+                    # Start new chunk (continuation)
+                    current_content = f"**Tasks (continued):**\n{line}"
                 else:
-                    current_chunk.append(task_line)
-                    current_size += len(task_line) + 1
+                    current_content += f"\n{line}"
 
-            # Add remaining tasks
-            if current_chunk:
-                chunks.append("\n".join(current_chunk))
+        # Add final chunk
+        if current_content:
+            chunks.append(current_content)
 
         return chunks
 
@@ -447,6 +585,18 @@ class MissionManager:
                 f"[{datetime.utcnow().strftime('%H:%M:%S')}] Mission resumed"
             )
             await self._save_current_mission()
+
+    async def complete_mission(self):
+        """Mark the current mission as completed."""
+        if self.current_mission:
+            self.current_mission.status = MissionStatus.COMPLETED
+            self.current_mission.completed_at = datetime.utcnow().isoformat()
+            self.current_mission.notes.append(
+                f"[{datetime.utcnow().strftime('%H:%M:%S')}] Mission completed"
+            )
+            await self._save_current_mission()
+            await self._archive_mission(self.current_mission)
+            logger.info(f"Mission {self.current_mission.mission_id} completed and archived")
 
 
 # Singleton instance

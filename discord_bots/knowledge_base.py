@@ -496,6 +496,317 @@ class KnowledgeBase:
         return "\n".join(lines)
 
 
+    # =========================================================================
+    # Pattern Recognition (P1 Enhancement)
+    # =========================================================================
+
+    def find_similar_patterns(
+        self,
+        task_description: str,
+        min_similarity: float = 0.6
+    ) -> List[Dict[str, Any]]:
+        """
+        Find similar past situations based on task description.
+
+        Useful for agents to learn from similar past work.
+
+        Args:
+            task_description: Current task to match against
+            min_similarity: Minimum similarity threshold
+
+        Returns:
+            List of pattern dicts with: learning, similarity, context
+        """
+        patterns = []
+        query_vector = self.vectorizer.transform(task_description)
+
+        for learning in self.learnings:
+            similarity = self.vectorizer.similarity(query_vector, learning._vector)
+
+            if similarity >= min_similarity:
+                patterns.append({
+                    "learning": learning.content,
+                    "category": learning.category,
+                    "mission_id": learning.mission_id,
+                    "similarity": similarity,
+                    "agent": learning.agent_type,
+                    "context": f"From mission {learning.mission_id}: {learning.content[:200]}"
+                })
+
+        # Sort by similarity
+        patterns.sort(key=lambda x: x["similarity"], reverse=True)
+        return patterns[:10]
+
+    def get_failure_modes(self, agent_type: str = None) -> List[Dict[str, Any]]:
+        """
+        Extract failure patterns from learnings.
+
+        Identifies learnings that mention failures, errors, or issues
+        to help agents avoid repeating mistakes.
+
+        Args:
+            agent_type: Optional filter by agent type
+
+        Returns:
+            List of failure mode dicts
+        """
+        failure_keywords = [
+            "failed", "error", "issue", "problem", "bug", "crash",
+            "timeout", "exception", "wrong", "incorrect", "broken",
+            "didn't work", "not working", "regression"
+        ]
+
+        failures = []
+        for learning in self.learnings:
+            if agent_type and learning.agent_type != agent_type:
+                continue
+
+            content_lower = learning.content.lower()
+            matched_keywords = [kw for kw in failure_keywords if kw in content_lower]
+
+            if matched_keywords:
+                failures.append({
+                    "learning_id": learning.learning_id,
+                    "content": learning.content,
+                    "category": learning.category,
+                    "agent": learning.agent_type,
+                    "failure_indicators": matched_keywords,
+                    "mission_id": learning.mission_id
+                })
+
+        # Sort by number of failure indicators (more = more relevant)
+        failures.sort(key=lambda x: len(x["failure_indicators"]), reverse=True)
+        return failures[:10]
+
+    def get_success_playbooks(self, task_type: str = None) -> List[Dict[str, Any]]:
+        """
+        Get successful patterns/playbooks for specific task types.
+
+        Identifies learnings with positive outcomes to replicate.
+
+        Args:
+            task_type: Optional task type keyword to filter
+
+        Returns:
+            List of success playbook dicts
+        """
+        success_keywords = [
+            "succeeded", "completed", "worked", "improved", "fixed",
+            "resolved", "achieved", "efficient", "optimized", "faster",
+            "better", "successful", "effectively"
+        ]
+
+        playbooks = []
+        for learning in self.learnings:
+            content_lower = learning.content.lower()
+
+            # Filter by task type if provided
+            if task_type and task_type.lower() not in content_lower:
+                continue
+
+            matched_keywords = [kw for kw in success_keywords if kw in content_lower]
+
+            if matched_keywords:
+                playbooks.append({
+                    "learning_id": learning.learning_id,
+                    "content": learning.content,
+                    "category": learning.category,
+                    "agent": learning.agent_type,
+                    "success_indicators": matched_keywords,
+                    "mission_id": learning.mission_id,
+                    "importance": learning.importance
+                })
+
+        # Sort by importance and success indicators
+        playbooks.sort(key=lambda x: (x["importance"], len(x["success_indicators"])), reverse=True)
+        return playbooks[:10]
+
+    def deduplicate_learnings(self, similarity_threshold: float = 0.85):
+        """
+        Merge similar learnings to prevent duplication.
+
+        Learnings with >threshold similarity are merged, keeping the
+        more important one and updating its metadata.
+
+        Args:
+            similarity_threshold: Similarity above which to merge
+        """
+        if len(self.learnings) < 2:
+            return
+
+        logger.info(f"Deduplicating learnings (threshold={similarity_threshold})")
+
+        merged_indices = set()
+        merged_count = 0
+
+        for i, learning_a in enumerate(self.learnings):
+            if i in merged_indices:
+                continue
+
+            for j, learning_b in enumerate(self.learnings[i+1:], start=i+1):
+                if j in merged_indices:
+                    continue
+
+                similarity = self.vectorizer.similarity(
+                    learning_a._vector,
+                    learning_b._vector
+                )
+
+                if similarity >= similarity_threshold:
+                    # Merge into the more important learning
+                    if learning_a.importance >= learning_b.importance:
+                        # Keep A, merge B into it
+                        learning_a.usage_count += learning_b.usage_count
+                        learning_a.importance = max(learning_a.importance, learning_b.importance)
+                        merged_indices.add(j)
+                    else:
+                        # Keep B, merge A into it
+                        learning_b.usage_count += learning_a.usage_count
+                        learning_b.importance = max(learning_a.importance, learning_b.importance)
+                        merged_indices.add(i)
+                        break  # A is merged, move on
+
+                    merged_count += 1
+
+        # Remove merged learnings
+        if merged_indices:
+            self.learnings = [
+                l for i, l in enumerate(self.learnings)
+                if i not in merged_indices
+            ]
+            self._rebuild_index()
+            self._save()
+            logger.info(f"Deduplicated: merged {merged_count} similar learnings, "
+                       f"{len(self.learnings)} remaining")
+
+    def get_cross_mission_patterns(self) -> List[Dict[str, Any]]:
+        """
+        Identify patterns that appear across multiple missions.
+
+        Returns learnings or themes that recur frequently.
+        """
+        # Group by content similarity
+        mission_ids_by_topic = {}
+        topic_representatives = {}
+
+        for learning in self.learnings:
+            # Find if this learning matches an existing topic
+            best_match = None
+            best_sim = 0
+
+            for topic_id, rep_vector in topic_representatives.items():
+                sim = self.vectorizer.similarity(learning._vector, rep_vector)
+                if sim > 0.5 and sim > best_sim:
+                    best_match = topic_id
+                    best_sim = sim
+
+            if best_match:
+                # Add to existing topic
+                if learning.mission_id not in mission_ids_by_topic[best_match]["missions"]:
+                    mission_ids_by_topic[best_match]["missions"].add(learning.mission_id)
+                    mission_ids_by_topic[best_match]["count"] += 1
+            else:
+                # Create new topic
+                topic_id = f"topic_{len(topic_representatives)}"
+                topic_representatives[topic_id] = learning._vector
+                mission_ids_by_topic[topic_id] = {
+                    "representative": learning.content[:200],
+                    "missions": {learning.mission_id},
+                    "count": 1,
+                    "category": learning.category
+                }
+
+        # Filter to patterns appearing in multiple missions
+        patterns = [
+            {
+                "pattern": data["representative"],
+                "missions": list(data["missions"]),
+                "frequency": data["count"],
+                "category": data["category"]
+            }
+            for topic_id, data in mission_ids_by_topic.items()
+            if data["count"] >= 2  # Appears in at least 2 missions
+        ]
+
+        patterns.sort(key=lambda x: x["frequency"], reverse=True)
+        return patterns[:10]
+
+    def get_agent_specific_context(
+        self,
+        agent_type: str,
+        task_description: str
+    ) -> str:
+        """
+        Get enhanced context for a specific agent including patterns.
+
+        Combines:
+        - Relevant learnings for the task
+        - Failure modes to avoid
+        - Success playbooks to follow
+
+        Args:
+            agent_type: The requesting agent type
+            task_description: Current task description
+
+        Returns:
+            Formatted context string for agent prompt
+        """
+        sections = []
+
+        # Get relevant learnings
+        basic_context = self.get_context_for_agent(agent_type, task_description)
+        if basic_context:
+            sections.append(basic_context)
+
+        # Get failure modes to avoid
+        failures = self.get_failure_modes(agent_type)
+        if failures:
+            failure_lines = ["### Failure Modes to Avoid:"]
+            for f in failures[:3]:
+                failure_lines.append(f"- {f['content'][:150]}")
+            sections.append("\n".join(failure_lines))
+
+        # Get similar past situations
+        patterns = self.find_similar_patterns(task_description)
+        if patterns:
+            pattern_lines = ["### Similar Past Situations:"]
+            for p in patterns[:3]:
+                pattern_lines.append(f"- {p['learning'][:150]} (similarity: {p['similarity']:.0%})")
+            sections.append("\n".join(pattern_lines))
+
+        # Combine sections with char limit
+        result = "\n\n".join(sections)
+        if len(result) > 3000:
+            result = result[:3000] + "\n... (truncated)"
+
+        return result
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get knowledge base statistics."""
+        if not self.learnings:
+            return {
+                "total_learnings": 0,
+                "missions_documented": 0
+            }
+
+        by_category = Counter(l.category for l in self.learnings)
+        by_agent = Counter(l.agent_type for l in self.learnings)
+        missions = set(l.mission_id for l in self.learnings)
+
+        return {
+            "total_learnings": len(self.learnings),
+            "missions_documented": len(missions),
+            "by_category": dict(by_category),
+            "by_agent": dict(by_agent),
+            "cross_mission_patterns": len(self.get_cross_mission_patterns()),
+            "most_used": sorted(
+                [(l.content[:50], l.usage_count) for l in self.learnings],
+                key=lambda x: x[1],
+                reverse=True
+            )[:5]
+        }
+
+
 # Singleton instance
 _knowledge_base: Optional[KnowledgeBase] = None
 

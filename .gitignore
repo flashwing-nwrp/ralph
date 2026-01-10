@@ -12,6 +12,25 @@ discord_bots/logs/
 discord_bots/venv/
 discord_bots/__pycache__/
 discord_bots/agents/__pycache__/
+discord_bots/polymarket/__pycache__/
+
+# Runtime data (generated during operation)
+discord_bots/data/
+discord_bots/learnings/
+discord_bots/screenshots/
+discord_bots/*.bak
+
+# Temp files
+tmp*.json
+nul
+
+# Local settings (may contain secrets)
+.claude/settings.local.json
+
+# Experimental/planning files
+discord_bots/agent_prompts_compact.py
+discord_bots/prompt_ab_test.py
+discord_bots/CHANGELOG_ENHANCEMENT_PLAN.md
 
 # Python
 *.pyc

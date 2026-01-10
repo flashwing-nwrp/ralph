@@ -239,16 +239,24 @@ class RALPHEmbeds:
     def agent_working(
         agent_type: str,
         task_description: str,
-        task_id: str = None
+        task_id: str = None,
+        handoff_from: str = None
     ) -> discord.Embed:
         """Create embed for agent working on a task."""
         emoji = get_agent_emoji(agent_type)
         color = get_agent_color(agent_type)
         title = get_agent_title(agent_type)
 
+        # Include handoff info in title if present
+        if handoff_from:
+            from_emoji = get_agent_emoji(handoff_from)
+            embed_title = f"{from_emoji} → {emoji} {agent_type.title()} Agent Working"
+        else:
+            embed_title = f"{emoji} {agent_type.title()} Agent Working"
+
         embed = discord.Embed(
-            title=f"{emoji} {agent_type.title()} Agent Working",
-            description=f"*\"{title}\"*",
+            title=embed_title,
+            description=f'*\"{title}\"*',
             color=color,
             timestamp=datetime.utcnow()
         )
@@ -280,46 +288,96 @@ class RALPHEmbeds:
         task_id: str = None
     ) -> discord.Embed:
         """Create embed for agent task completion with support for longer outputs."""
-        emoji = get_agent_emoji(agent_type)
+        # For backwards compatibility, return single embed (truncated)
+        embeds = RALPHEmbeds.agent_complete_chunked(
+            agent_type, task_description, result_summary, duration_seconds, task_id
+        )
+        return embeds[0] if embeds else discord.Embed(title="Task Complete")
+
+    @staticmethod
+    def agent_complete_chunked(
+        agent_type: str,
+        task_description: str,
+        result_summary: str,
+        duration_seconds: float = 0,
+        task_id: str = None,
+        max_chunk_size: int = 3500
+    ) -> list:
+        """
+        Create list of embeds for agent task completion, chunked for Discord limits.
+
+        Returns multiple embeds for long outputs to avoid truncation.
+        """
         color = get_agent_color(agent_type)
         title = get_agent_title(agent_type)
 
         # Build header with task info
-        header = f"**Task:** {task_description[:150]}" if task_description else ""
+        header = f"**Task:** {task_description[:500]}" if task_description else ""
         if task_id:
             header = f"`{task_id}` | {header}"
 
-        # Use description for longer output (4096 char limit vs 1024 for fields)
-        # Truncate intelligently - try to end at a sentence or line break
         summary = result_summary or "Success"
-        if len(summary) > 3800:
-            # Find a good break point
-            break_points = ["\n\n", "\n", ". ", ", "]
-            truncated = summary[:3800]
-            for bp in break_points:
-                last_break = truncated.rfind(bp)
-                if last_break > 3000:
-                    truncated = truncated[:last_break + len(bp)]
-                    break
-            summary = truncated + "\n\n*[Output truncated...]*"
+        embeds = []
 
-        embed = discord.Embed(
-            title=f"✅ {title} Complete",
-            description=f"{header}\n\n{summary}",
-            color=color,
-            timestamp=datetime.utcnow()
-        )
+        # Calculate how much space we have after header
+        header_len = len(header) + 4  # +4 for "\n\n"
 
-        # Add metadata as inline fields
-        if duration_seconds > 0:
-            embed.add_field(
-                name="⏱️ Duration",
-                value=f"{duration_seconds:.1f}s",
-                inline=True
-            )
+        # Split summary into chunks
+        remaining = summary
+        chunk_num = 0
 
-        embed.set_footer(text=f"RALPH | {agent_type.title()} Agent")
-        return embed
+        while remaining:
+            chunk_num += 1
+            is_first = chunk_num == 1
+
+            # First chunk has header, subsequent chunks have continuation title
+            if is_first:
+                available = max_chunk_size - header_len
+            else:
+                available = max_chunk_size
+
+            if len(remaining) <= available:
+                # Last chunk
+                chunk = remaining
+                remaining = ""
+            else:
+                # Find a good break point
+                chunk = remaining[:available]
+                break_points = ["\n\n", "\n", ". ", ", ", " "]
+                for bp in break_points:
+                    last_break = chunk.rfind(bp)
+                    if last_break > available * 0.7:  # At least 70% of available space
+                        chunk = chunk[:last_break + len(bp)]
+                        break
+
+                remaining = remaining[len(chunk):]
+
+            # Create embed
+            if is_first:
+                embed = discord.Embed(
+                    title=f"✅ {title} Complete",
+                    description=f"{header}\n\n{chunk}",
+                    color=color,
+                    timestamp=datetime.utcnow()
+                )
+                # Add duration to first embed only
+                if duration_seconds > 0:
+                    embed.add_field(
+                        name="⏱️ Duration",
+                        value=f"{duration_seconds:.1f}s",
+                        inline=True
+                    )
+            else:
+                embed = discord.Embed(
+                    title=f"📄 {title} (continued {chunk_num})",
+                    description=chunk,
+                    color=color
+                )
+
+            embed.set_footer(text=f"RALPH | {agent_type.title()} Agent")
+            embeds.append(embed)
+
+        return embeds if embeds else [discord.Embed(title="Task Complete")]
 
     @staticmethod
     def agent_error(
@@ -338,12 +396,12 @@ class RALPHEmbeds:
         )
         embed.add_field(
             name="\u274C Task",
-            value=task_description[:200] if task_description else "Task failed",
+            value=task_description[:500] if task_description else "Task failed",
             inline=False
         )
         embed.add_field(
             name="Error",
-            value=f"```\n{error_message[:300]}\n```" if error_message else "Unknown error",
+            value=f"```\n{error_message[:800]}\n```" if error_message else "Unknown error",
             inline=False
         )
         if task_id:
@@ -686,6 +744,84 @@ class RALPHEmbeds:
             )
 
         embed.set_footer(text=f"RALPH | {agent_type.title()} Agent")
+        return embed
+
+    @staticmethod
+    def experiment_proposal(
+        experiment_id: str,
+        title: str,
+        description: str,
+        risk_level: str = "low",
+        steps: List[str] = None
+    ) -> discord.Embed:
+        """Create embed for experiment proposal from Innovation Loop."""
+        risk_colors = {
+            "low": 0x27AE60,      # Green
+            "medium": 0xF39C12,   # Orange
+            "high": 0xE74C3C      # Red
+        }
+        risk_emojis = {
+            "low": "🟢",
+            "medium": "🟡",
+            "high": "🔴"
+        }
+
+        color = risk_colors.get(risk_level, 0x95A5A6)
+        risk_emoji = risk_emojis.get(risk_level, "⚪")
+
+        embed = discord.Embed(
+            title=f"🔬 Experiment Proposal: {experiment_id}",
+            description=f"**{title}**\n\n{description}",
+            color=color,
+            timestamp=datetime.utcnow()
+        )
+
+        embed.add_field(
+            name="Risk Level",
+            value=f"{risk_emoji} {risk_level.title()}",
+            inline=True
+        )
+
+        if steps:
+            steps_text = "\n".join(f"• {step}" for step in steps[:5])
+            embed.add_field(
+                name="Implementation Steps",
+                value=steps_text,
+                inline=False
+            )
+
+        embed.add_field(
+            name="Actions",
+            value=f"Use `!approve_experiment {experiment_id}` to approve\n"
+                  f"Use `!reject_experiment {experiment_id} <reason>` to reject",
+            inline=False
+        )
+
+        embed.set_footer(text="RALPH | Innovation Loop")
+        return embed
+
+    @staticmethod
+    def innovation_stats(
+        cycles: int,
+        anomalies: int,
+        experiments_proposed: int,
+        experiments_approved: int,
+        pending: int
+    ) -> discord.Embed:
+        """Create embed for innovation loop statistics."""
+        embed = discord.Embed(
+            title="🔬 Innovation Loop Status",
+            color=0x9B59B6,  # Purple
+            timestamp=datetime.utcnow()
+        )
+
+        embed.add_field(name="Cycles Run", value=str(cycles), inline=True)
+        embed.add_field(name="Anomalies Detected", value=str(anomalies), inline=True)
+        embed.add_field(name="Experiments Proposed", value=str(experiments_proposed), inline=True)
+        embed.add_field(name="Experiments Approved", value=str(experiments_approved), inline=True)
+        embed.add_field(name="Pending Approval", value=str(pending), inline=True)
+
+        embed.set_footer(text="RALPH | Innovation Loop")
         return embed
 
 

@@ -211,6 +211,7 @@ class BaseAgentBot(ABC):
         self._register_proposal_commands()
         self._register_scrum_commands()
         self._register_operational_commands()
+        self._register_openproject_commands()
         self._register_interbot_commands()
 
     @classmethod
@@ -664,37 +665,54 @@ Only output the structured commands, no other text."""
 
         @self.bot.command(name="help")
         async def help_cmd(ctx: commands.Context):
-            """Show available commands."""
-            agent_commands = await self.get_commands()
+            """Show available commands with interactive category selection."""
+            try:
+                from discord_interactions import HelpView, send_help_menu
+                await send_help_menu(ctx)
+            except ImportError:
+                # Fallback to text-based help
+                agent_commands = await self.get_commands()
 
-            embed = discord.Embed(
-                title=f"{self.agent_name} Commands",
-                color=discord.Color.blue()
-            )
+                embed = discord.Embed(
+                    title=f"{self.agent_name} Commands",
+                    color=discord.Color.blue()
+                )
 
-            # Common commands
-            embed.add_field(
-                name="Common Commands",
-                value=(
-                    "`!ping` - Check bot latency\n"
-                    "`!status` - Get agent status\n"
-                    "`!help` - Show this message\n"
-                    "`!mission <goal>` - Set a new mission (owner)\n"
-                    "`!mission_status` - Check mission progress"
-                ),
-                inline=False
-            )
-
-            # Agent-specific commands
-            if agent_commands:
-                cmd_text = "\n".join([f"`!{cmd}` - {desc}" for cmd, desc in agent_commands.items()])
+                # Common commands
                 embed.add_field(
-                    name=f"{self.agent_name} Commands",
-                    value=cmd_text,
+                    name="Common Commands",
+                    value=(
+                        "`!menu` - **Interactive menu** (recommended)\n"
+                        "`!ping` - Check bot latency\n"
+                        "`!status` - Get agent status\n"
+                        "`!help` - Show this message\n"
+                        "`!mission <goal>` - Set a new mission (owner)\n"
+                        "`!mission_status` - Check mission progress"
+                    ),
                     inline=False
                 )
 
-            await ctx.reply(embed=embed)
+                # Agent-specific commands
+                if agent_commands:
+                    cmd_text = "\n".join([f"`!{cmd}` - {desc}" for cmd, desc in agent_commands.items()])
+                    embed.add_field(
+                        name=f"{self.agent_name} Commands",
+                        value=cmd_text,
+                        inline=False
+                    )
+
+                await ctx.reply(embed=embed)
+
+        @self.bot.command(name="menu")
+        async def menu(ctx: commands.Context):
+            """Open the interactive command menu with dropdowns."""
+            try:
+                from discord_interactions import send_main_menu
+                await send_main_menu(ctx)
+            except ImportError:
+                await ctx.reply("Interactive menus not available. Use `!help` for commands.")
+            except Exception as e:
+                await ctx.reply(f"Error opening menu: {str(e)[:100]}")
 
     def _register_execution_commands(self):
         """Register commands for Claude Code execution."""
@@ -791,6 +809,54 @@ Only output the structured commands, no other text."""
             embed.add_field(name="Recent Completed", value=completed_text, inline=False)
 
             await ctx.reply(embed=embed)
+
+        @self.bot.command(name="browse")
+        async def browse(ctx: commands.Context, url: str = None, *, task: str = "Extract main content"):
+            """Browse a URL and extract information using headless browser."""
+            if not url:
+                await ctx.reply(
+                    "Usage: `!browse <url> [task]`\n"
+                    "Examples:\n"
+                    "• `!browse https://polymarket.com/markets Extract crypto market prices`\n"
+                    "• `!browse https://example.com` (extracts main content)"
+                )
+                return
+
+            # Import browser tool
+            try:
+                from browser_automation import get_browser_tool, PLAYWRIGHT_AVAILABLE
+                if not PLAYWRIGHT_AVAILABLE:
+                    await ctx.reply(
+                        "Browser automation not available. Install with:\n"
+                        "```\npip install playwright && playwright install chromium\n```"
+                    )
+                    return
+            except ImportError:
+                await ctx.reply("Browser automation module not found.")
+                return
+
+            status_msg = await ctx.reply(f"Browsing `{url[:50]}...`")
+
+            try:
+                browser = get_browser_tool()
+                result = await browser.fetch_page(url, take_screenshot=True)
+
+                if result.success:
+                    # Truncate content for Discord
+                    content = result.content[:1500] if len(result.content) > 1500 else result.content
+                    embed = discord.Embed(
+                        title=f"Browser: {result.title[:100]}",
+                        description=f"**URL:** {url}\n\n{content}",
+                        color=discord.Color.green()
+                    )
+                    if result.screenshot_path:
+                        embed.set_footer(text=f"Screenshot: {result.screenshot_path}")
+                    await ctx.reply(embed=embed)
+                else:
+                    await ctx.reply(f"Failed to browse: {result.error}")
+
+            except Exception as e:
+                await ctx.reply(f"Browser error: {str(e)[:200]}")
 
     def _register_user_commands(self):
         """Register commands for user/operator interaction."""
@@ -1082,6 +1148,628 @@ Only output the structured commands, no other text."""
             embed.set_footer(text="Use log files for detailed post-hoc analysis")
             await ctx.reply(embed=embed)
 
+        @self.bot.command(name="tokens")
+        async def token_stats(ctx: commands.Context, action: str = None):
+            """Show token optimization stats (!tokens) or manage cache (!tokens clear/reset)."""
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            from claude_executor import get_token_optimization_stats, clear_token_cache, reset_token_stats
+
+            if action == "clear":
+                result = clear_token_cache()
+                await ctx.reply(f"🗑️ {result}")
+                return
+            elif action == "reset":
+                result = reset_token_stats()
+                await ctx.reply(f"🔄 {result}")
+                return
+
+            # Show stats
+            stats_report = get_token_optimization_stats()
+
+            embed = discord.Embed(
+                title="🔋 Token Optimization Stats",
+                color=0x00FF00,  # Green
+                description=stats_report.replace("**", "").replace("- ", "• ")
+            )
+            embed.set_footer(text="Use !tokens clear to clear cache, !tokens reset to reset stats")
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="prompt_test")
+        async def prompt_test(ctx: commands.Context, action: str = None):
+            """Show prompt optimization A/B test results (!prompt_test)."""
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            try:
+                from token_optimizer import get_token_optimizer, USE_COMPACT_PROMPTS, COMPACT_PROMPTS_AVAILABLE
+                from agent_prompts_compact import compare_token_usage
+            except ImportError as e:
+                await ctx.reply(f"Prompt test not available: {e}")
+                return
+
+            optimizer = get_token_optimizer()
+            stats = optimizer.get_stats()
+
+            # Get token comparison
+            try:
+                comparison = compare_token_usage()
+            except Exception:
+                comparison = {}
+
+            # Build report
+            mode = "COMPACT" if stats.get("prompt_mode") == "compact" else "VERBOSE"
+            variants = stats.get("variant_counts", {})
+
+            # Format comparison table
+            comparison_lines = []
+            total_verbose = 0
+            total_compact = 0
+            for agent, data in comparison.items():
+                comparison_lines.append(
+                    f"  {agent}: {data['verbose_tokens']} -> {data['compact_tokens']} ({data['savings_pct']})"
+                )
+                total_verbose += data['verbose_tokens']
+                total_compact += data['compact_tokens']
+
+            embed = discord.Embed(
+                title="🧪 Prompt Optimization Test",
+                color=0x9B59B6,  # Purple
+            )
+
+            # Current mode
+            embed.add_field(
+                name="Current Mode",
+                value=f"**{mode}** prompts {'(recommended)' if mode == 'COMPACT' else ''}",
+                inline=False
+            )
+
+            # Priming stats
+            priming_stats = []
+            for variant, count in variants.items():
+                if count > 0:
+                    priming_stats.append(f"{variant}: {count}")
+            embed.add_field(
+                name="Priming Sessions",
+                value="\n".join(priming_stats) if priming_stats else "None yet",
+                inline=True
+            )
+
+            # Token savings
+            embed.add_field(
+                name="Est. Savings",
+                value=f"{stats['tokens_saved_estimate']:,} tokens\n{stats['cost_saved_estimate']}",
+                inline=True
+            )
+
+            # Comparison table
+            if comparison_lines:
+                savings_pct = (1 - total_compact / total_verbose) * 100 if total_verbose > 0 else 0
+                embed.add_field(
+                    name=f"Token Comparison (Verbose vs Compact)",
+                    value=f"```\n" + "\n".join(comparison_lines) + f"\n  ─────────────────────\n  Total: {total_verbose} -> {total_compact} ({savings_pct:.1f}% saved)\n```",
+                    inline=False
+                )
+
+            embed.set_footer(text="Compact prompts reduce priming tokens by ~70% while maintaining agent identity")
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="parallel")
+        async def parallel_stats(ctx: commands.Context):
+            """Show parallel execution statistics (!parallel)."""
+            # Only Strategy Agent handles this to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            from autonomous_orchestrator import get_orchestrator
+
+            orchestrator = get_orchestrator()
+            if not orchestrator:
+                await ctx.reply("Orchestrator not initialized.")
+                return
+
+            stats_report = orchestrator.get_parallel_stats()
+
+            embed = discord.Embed(
+                title="⚡ Parallel Execution Stats",
+                color=0x9B59B6,  # Purple
+                description=stats_report.replace("**", "").replace("- ", "• ")
+            )
+            await ctx.reply(embed=embed)
+
+        # =====================================================================
+        # Polymarket Commands
+        # =====================================================================
+
+        @self.bot.command(name="markets")
+        async def markets(ctx: commands.Context, category: str = None):
+            """List active Polymarket markets (!markets [category])."""
+            # Only Data Agent handles this to avoid duplicates
+            if self.agent_type != "data":
+                return
+
+            # Show interactive category selector if no category
+            if not category:
+                try:
+                    from discord_interactions import send_market_menu
+                    await send_market_menu(ctx)
+                    return
+                except ImportError:
+                    pass  # Fall through to show all markets
+
+            try:
+                from polymarket import get_polymarket_service
+
+                service = await get_polymarket_service()
+                if not service.is_available:
+                    await ctx.reply("Polymarket integration not available.")
+                    return
+
+                crypto_only = category and category.lower() == "crypto"
+                market_list = await service.get_markets(
+                    category=None if crypto_only else category,
+                    crypto_only=crypto_only,
+                    limit=10
+                )
+
+                if not market_list:
+                    await ctx.reply("No markets found.")
+                    return
+
+                # Build embed
+                embed = discord.Embed(
+                    title=f"📊 Polymarket Markets" + (f" ({category})" if category else ""),
+                    color=0x00D4AA
+                )
+
+                for market in market_list[:10]:
+                    embed.add_field(
+                        name=market.question[:100] + ("..." if len(market.question) > 100 else ""),
+                        value=f"YES: ${market.yes_price:.3f} | NO: ${market.no_price:.3f}\n"
+                              f"Vol: ${market.volume_24h:,.0f}",
+                        inline=False
+                    )
+
+                embed.set_footer(text="Use !market <condition_id> for details")
+                await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Polymarket module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error fetching markets: {str(e)[:100]}")
+
+        @self.bot.command(name="market")
+        async def market(ctx: commands.Context, condition_id: str = None):
+            """Get detailed market info (!market <condition_id>)."""
+            if self.agent_type != "data":
+                return
+
+            if not condition_id:
+                await ctx.reply("Usage: `!market <condition_id>`")
+                return
+
+            try:
+                from polymarket import get_polymarket_service
+
+                service = await get_polymarket_service()
+                if not service.is_available:
+                    await ctx.reply("Polymarket integration not available.")
+                    return
+
+                market_data = await service.get_market(condition_id)
+                if not market_data:
+                    await ctx.reply(f"Market not found: {condition_id}")
+                    return
+
+                embed = discord.Embed(
+                    title=market_data.question[:200],
+                    color=0x00D4AA
+                )
+
+                embed.add_field(name="Status", value=market_data.status.value, inline=True)
+                embed.add_field(name="YES Price", value=f"${market_data.yes_price:.4f}", inline=True)
+                embed.add_field(name="NO Price", value=f"${market_data.no_price:.4f}", inline=True)
+                embed.add_field(name="Combined", value=f"${market_data.combined_price:.4f}", inline=True)
+                embed.add_field(name="24h Volume", value=f"${market_data.volume_24h:,.0f}", inline=True)
+                embed.add_field(name="Liquidity", value=f"${market_data.liquidity:,.0f}", inline=True)
+
+                if market_data.has_arbitrage:
+                    embed.add_field(
+                        name="⚠️ Arbitrage",
+                        value=f"Potential profit: {(1 - market_data.combined_price) * 100:.2f}%",
+                        inline=False
+                    )
+
+                embed.set_footer(text=f"ID: {condition_id}")
+                await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Polymarket module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        @self.bot.command(name="arb_scan")
+        async def arb_scan(ctx: commands.Context, min_profit: float = 0.5):
+            """Scan for arbitrage opportunities (!arb_scan [min_profit_pct])."""
+            if self.agent_type != "data":
+                return
+
+            try:
+                from polymarket import get_polymarket_service
+
+                service = await get_polymarket_service()
+                if not service.is_available:
+                    await ctx.reply("Polymarket integration not available.")
+                    return
+
+                await ctx.send("🔍 Scanning for arbitrage opportunities...")
+
+                opportunities = await service.scan_arbitrage(min_profit=min_profit / 100)
+
+                if not opportunities:
+                    await ctx.reply(f"No arbitrage opportunities found with >{min_profit}% profit.")
+                    return
+
+                embed = discord.Embed(
+                    title=f"💰 Arbitrage Opportunities (>{min_profit}%)",
+                    color=0xFFD700,
+                    description=f"Found {len(opportunities)} opportunities"
+                )
+
+                for opp in opportunities[:5]:
+                    embed.add_field(
+                        name=opp.market.question[:80] + "...",
+                        value=f"YES: ${opp.yes_price:.4f} + NO: ${opp.no_price:.4f} = ${opp.combined_price:.4f}\n"
+                              f"**Profit: {opp.profit_pct:.2f}%**",
+                        inline=False
+                    )
+
+                await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Polymarket module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        @self.bot.command(name="polymarket_status")
+        async def polymarket_status(ctx: commands.Context):
+            """Check Polymarket API status (!polymarket_status)."""
+            if self.agent_type != "data":
+                return
+
+            try:
+                from polymarket import get_polymarket_service
+
+                service = await get_polymarket_service()
+
+                await ctx.send("🔍 Checking Polymarket APIs...")
+                await service.check_api_health()
+
+                report = service.get_stats_report()
+
+                embed = discord.Embed(
+                    title="📡 Polymarket Status",
+                    color=0x00D4AA,
+                    description=report.replace("**", "").replace("- ", "• ")
+                )
+                await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Polymarket module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        # =====================================================================
+        # Innovation Loop Commands
+        # =====================================================================
+
+        @self.bot.command(name="experiments")
+        async def experiments(ctx: commands.Context):
+            """List pending experiment proposals with interactive approval (!experiments)."""
+            if self.agent_type != "strategy":
+                return
+
+            try:
+                from innovation_loop import get_innovation_loop
+
+                loop = get_innovation_loop()
+                if not loop:
+                    await ctx.reply("Innovation loop not running. Enable with `INNOVATION_LOOP_ENABLED=true`")
+                    return
+
+                pending = loop.get_pending_experiments()
+
+                if not pending:
+                    await ctx.reply("No pending experiments. The Innovation Loop is analyzing for improvements.")
+                    return
+
+                # Try to use interactive view with buttons
+                try:
+                    from discord_interactions import ExperimentActionView
+
+                    exp = pending[0]
+                    view = ExperimentActionView(exp.id, len(pending))
+
+                    embed = discord.Embed(
+                        title=f"🧪 Experiment: {exp.id[:8]}...",
+                        description=exp.hypothesis.title if hasattr(exp.hypothesis, 'title') else str(exp.hypothesis),
+                        color=0x9B59B6
+                    )
+                    embed.add_field(name="Risk Level", value=str(exp.hypothesis.risk_level) if hasattr(exp.hypothesis, 'risk_level') else "Unknown", inline=True)
+                    embed.add_field(name="Pending", value=f"{len(pending)} total", inline=True)
+                    embed.add_field(name="Created", value=exp.created_at.strftime('%Y-%m-%d %H:%M'), inline=True)
+                    embed.set_footer(text="Use buttons below to approve/reject, or skip to next")
+
+                    await ctx.reply(embed=embed, view=view)
+
+                except ImportError:
+                    # Fall back to text-based list
+                    embed = discord.Embed(
+                        title="🔬 Pending Experiments",
+                        description=f"{len(pending)} experiments awaiting approval",
+                        color=0x9B59B6
+                    )
+
+                    for exp in pending[:5]:
+                        embed.add_field(
+                            name=f"{exp.id}: {exp.hypothesis.title if hasattr(exp.hypothesis, 'title') else 'Experiment'}",
+                            value=f"Risk: {exp.hypothesis.risk_level if hasattr(exp.hypothesis, 'risk_level') else 'Unknown'}\n"
+                                  f"Created: {exp.created_at.strftime('%Y-%m-%d %H:%M')}",
+                            inline=False
+                        )
+
+                    embed.set_footer(text="Use !approve_experiment <id> or !reject_experiment <id> <reason>")
+                    await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Innovation loop module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        @self.bot.command(name="approve_experiment")
+        async def approve_experiment(ctx: commands.Context, exp_id: str = None):
+            """Approve an experiment (!approve_experiment <id>)."""
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can approve experiments.")
+                return
+
+            if not exp_id:
+                await ctx.reply("Usage: `!approve_experiment <experiment_id>`")
+                return
+
+            try:
+                from innovation_loop import get_innovation_loop
+
+                loop = get_innovation_loop()
+                if not loop:
+                    await ctx.reply("Innovation loop not running.")
+                    return
+
+                success = await loop.approve_experiment(exp_id, str(ctx.author))
+                if success:
+                    await ctx.reply(f"✅ Experiment {exp_id} approved and queued for execution.")
+                else:
+                    await ctx.reply(f"Could not approve {exp_id}. Check the experiment ID and status.")
+
+            except ImportError:
+                await ctx.reply("Innovation loop module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        @self.bot.command(name="reject_experiment")
+        async def reject_experiment(ctx: commands.Context, exp_id: str = None, *, reason: str = None):
+            """Reject an experiment (!reject_experiment <id> <reason>)."""
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can reject experiments.")
+                return
+
+            if not exp_id:
+                await ctx.reply("Usage: `!reject_experiment <experiment_id> <reason>`")
+                return
+
+            try:
+                from innovation_loop import get_innovation_loop
+
+                loop = get_innovation_loop()
+                if not loop:
+                    await ctx.reply("Innovation loop not running.")
+                    return
+
+                success = await loop.reject_experiment(exp_id, reason or "No reason provided")
+                if success:
+                    await ctx.reply(f"❌ Experiment {exp_id} rejected.")
+                else:
+                    await ctx.reply(f"Could not reject {exp_id}. Check the experiment ID and status.")
+
+            except ImportError:
+                await ctx.reply("Innovation loop module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        @self.bot.command(name="innovation_stats")
+        async def innovation_stats(ctx: commands.Context):
+            """Show innovation loop statistics (!innovation_stats)."""
+            if self.agent_type != "strategy":
+                return
+
+            try:
+                from innovation_loop import get_innovation_loop
+
+                loop = get_innovation_loop()
+                if not loop:
+                    await ctx.reply("Innovation loop not running.")
+                    return
+
+                stats = loop.get_stats()
+                report = loop.get_stats_report()
+
+                embed = discord.Embed(
+                    title="🔬 Innovation Loop Stats",
+                    color=0x9B59B6,
+                    description=report.replace("**", "").replace("- ", "• ")
+                )
+                await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Innovation loop module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        # =====================================================================
+        # Research Commands (moved to _register_operational_commands)
+        # =====================================================================
+
+        @self.bot.command(name="best_practices")
+        async def best_practices(ctx: commands.Context, *, topic: str = None):
+            """Search for best practices on a topic (!best_practices <topic>)."""
+            if not topic:
+                await ctx.reply("Usage: `!best_practices <topic>`")
+                return
+
+            try:
+                from research_tools import get_research_tools
+
+                tools = get_research_tools()
+                await ctx.send(f"🔍 Finding best practices for: {topic}...")
+
+                result = await tools.search_best_practices(topic)
+
+                embed = discord.Embed(
+                    title=f"📚 Best Practices: {topic[:50]}",
+                    color=0x27AE60
+                )
+
+                for i, r in enumerate(result.results[:5], 1):
+                    embed.add_field(
+                        name=f"{i}. {r.title[:60]}",
+                        value=f"{r.snippet[:200]}\n[Link]({r.url})",
+                        inline=False
+                    )
+
+                embed.set_footer(text=f"Found {len(result.results)} results")
+                await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Research tools module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
+        @self.bot.command(name="sentiment")
+        async def sentiment(ctx: commands.Context, *, topic: str = None):
+            """Get crypto sentiment or news sentiment (!sentiment <symbol|topic>)."""
+            if self.agent_type != "data":
+                return
+
+            if not topic:
+                # Show interactive menu instead of usage text
+                try:
+                    from discord_interactions import send_sentiment_menu
+                    await send_sentiment_menu(ctx)
+                    return
+                except ImportError:
+                    await ctx.reply("Usage: `!sentiment <BTC|ETH|SOL|topic>`")
+                    return
+
+            try:
+                from research_tools import get_research_tools
+
+                tools = get_research_tools()
+
+                # Check if topic is a crypto symbol
+                crypto_symbols = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LINK"}
+                topic_upper = topic.upper().strip()
+
+                if topic_upper in crypto_symbols:
+                    # Use CryptoPanic for crypto sentiment
+                    await ctx.send(f"📊 Fetching crypto sentiment for {topic_upper}...")
+
+                    result = await tools.get_crypto_sentiment(topic_upper)
+
+                    if result.error:
+                        await ctx.reply(f"Sentiment error: {result.error}")
+                        return
+
+                    # Color based on sentiment
+                    if result.sentiment_label == "bullish":
+                        color = 0x2ECC71  # Green
+                        emoji = "🟢"
+                    elif result.sentiment_label == "bearish":
+                        color = 0xE74C3C  # Red
+                        emoji = "🔴"
+                    else:
+                        color = 0xF39C12  # Yellow
+                        emoji = "🟡"
+
+                    embed = discord.Embed(
+                        title=f"{emoji} {topic_upper} Sentiment: {result.sentiment_label.upper()}",
+                        color=color
+                    )
+
+                    # Sentiment score gauge
+                    score_pct = (result.sentiment_score + 1) / 2 * 100  # Convert -1..1 to 0..100
+                    gauge = "▓" * int(score_pct / 10) + "░" * (10 - int(score_pct / 10))
+                    embed.add_field(
+                        name="Sentiment Score",
+                        value=f"`{gauge}` {result.sentiment_score:+.2f}",
+                        inline=False
+                    )
+
+                    # Breakdown
+                    embed.add_field(name="🟢 Bullish", value=str(result.bullish_count), inline=True)
+                    embed.add_field(name="🔴 Bearish", value=str(result.bearish_count), inline=True)
+                    embed.add_field(name="⚪ Neutral", value=str(result.neutral_count), inline=True)
+
+                    # Top headlines
+                    if result.headlines:
+                        headlines_text = ""
+                        for h in result.headlines[:5]:
+                            sent = h.get("sentiment", 0)
+                            sent_icon = "🟢" if sent > 0.2 else ("🔴" if sent < -0.2 else "⚪")
+                            title = h.get("title", "")[:60]
+                            headlines_text += f"{sent_icon} {title}...\n"
+                        embed.add_field(name="Recent Headlines", value=headlines_text[:1000], inline=False)
+
+                    embed.set_footer(text=f"Source: {result.source} | {len(result.headlines)} headlines analyzed")
+                    await ctx.reply(embed=embed)
+
+                else:
+                    # Fall back to general news search for non-crypto topics
+                    await ctx.send(f"📰 Searching news sentiment for: {topic}...")
+
+                    result = await tools.search_news(topic)
+
+                    embed = discord.Embed(
+                        title=f"📰 News Sentiment: {topic[:50]}",
+                        color=0xE74C3C
+                    )
+
+                    if not result.results:
+                        embed.description = "No recent news found."
+                    else:
+                        for r in result.results[:5]:
+                            embed.add_field(
+                                name=r.source or "News",
+                                value=f"**{r.title[:60]}**\n{r.snippet[:150]}...",
+                                inline=False
+                            )
+
+                    embed.set_footer(text=f"Found {len(result.results)} articles")
+                    await ctx.reply(embed=embed)
+
+            except ImportError:
+                await ctx.reply("Research tools module not loaded.")
+            except Exception as e:
+                await ctx.reply(f"Error: {str(e)[:100]}")
+
     def _register_mission_commands(self):
         """Register commands for mission/goal management."""
 
@@ -1097,10 +1785,14 @@ Only output the structured commands, no other text."""
                 return
 
             if not objective:
-                # Show current mission status
+                # Show current mission status using proper chunking
                 manager = get_mission_manager()
-                summary = manager.get_mission_summary()
-                await ctx.reply(summary)
+                chunks = manager.get_mission_summary_chunks()
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await ctx.reply(chunk)
+                    else:
+                        await ctx.send(chunk)
                 return
 
             # Create new mission
@@ -1244,16 +1936,33 @@ Only output the structured commands, no other text."""
 
         @self.bot.command(name="mission_status")
         async def mission_status(ctx: commands.Context):
-            """Check the current mission status."""
-            manager = get_mission_manager()
-            chunks = manager.get_mission_summary_chunks()
+            """Check the current mission status with interactive controls."""
+            # Only Strategy Agent responds to avoid duplicate messages
+            if self.agent_type != "strategy":
+                return
 
-            # Send first chunk as reply, rest as follow-up messages
-            for i, chunk in enumerate(chunks):
-                if i == 0:
-                    await ctx.reply(chunk)
-                else:
-                    await ctx.send(chunk)
+            manager = get_mission_manager()
+            if not manager.current_mission:
+                await ctx.reply("No active mission. Start one with `!mission <objective>`")
+                return
+
+            # Use interactive view if owner, otherwise show text summary
+            if self._is_owner(ctx.author.id):
+                from discord_interactions import create_mission_status_with_controls
+                embed, view = create_mission_status_with_controls(
+                    mission=manager.current_mission,
+                    mission_manager=manager,
+                    author_id=ctx.author.id
+                )
+                await ctx.reply(embed=embed, view=view)
+            else:
+                # Text summary for non-owners
+                chunks = manager.get_mission_summary_chunks()
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await ctx.reply(chunk)
+                    else:
+                        await ctx.send(chunk)
 
         @self.bot.command(name="pause_mission")
         async def pause_mission(ctx: commands.Context):
@@ -2089,6 +2798,293 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             report = scrum.get_velocity_report()
             await ctx.reply(report)
 
+        # =====================================================================
+        # BACKLOG MANAGEMENT (Agile Ceremonies)
+        # =====================================================================
+
+        @self.bot.command(name="team_backlog")
+        async def team_backlog(ctx: commands.Context, filter_type: str = None):
+            """
+            View the team's observation backlog for grooming.
+
+            Usage:
+              !team_backlog           - Show all pending items (for grooming)
+              !team_backlog all       - Show all items
+              !team_backlog approved  - Show approved items (sprint candidates)
+              !team_backlog bugs      - Show only bugs
+              !team_backlog ideas     - Show only ideas
+
+            This is different from !backlog (scrum product backlog).
+            Team backlog contains observations agents notice during work.
+            """
+            from backlog_manager import get_backlog_manager, BacklogStatus
+
+            mgr = get_backlog_manager()
+
+            if filter_type == "all":
+                items = mgr.list_items()
+                title = "Full Backlog"
+            elif filter_type == "approved":
+                items = mgr.get_approved_items()
+                title = "Approved Items (Sprint Candidates)"
+            elif filter_type == "bugs":
+                items = mgr.list_items(item_type="bug")
+                title = "Bug Backlog"
+            elif filter_type == "ideas":
+                items = mgr.list_items(item_type="idea")
+                title = "Ideas Backlog"
+            elif filter_type == "improvements":
+                items = mgr.list_items(item_type="improvement")
+                title = "Improvements Backlog"
+            else:
+                items = mgr.get_pending_items()
+                title = "Pending Items (Awaiting Grooming)"
+
+            if not items:
+                await ctx.reply(f"**{title}**\n\nNo items found.")
+                return
+
+            # Format output
+            lines = [f"**{title}** ({len(items)} items)\n"]
+            for item in items[:15]:  # Limit to 15 items
+                status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌", "in_progress": "🔄", "completed": "✔️"}
+                priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                type_emoji = {"bug": "🐛", "improvement": "💡", "idea": "💭", "tech_debt": "🔧"}
+
+                emoji = status_emoji.get(item.status, "")
+                prio = priority_emoji.get(item.priority, "")
+                typ = type_emoji.get(item.item_type, "")
+
+                lines.append(f"{emoji} **{item.id}** {typ} {prio} {item.title}")
+                if item.rationale:
+                    lines.append(f"   └─ {item.rationale[:80]}...")
+
+            if len(items) > 15:
+                lines.append(f"\n... and {len(items) - 15} more items")
+
+            # For pending items, show interactive approval to owner
+            pending_items = [i for i in items if i.status == "pending"]
+            if pending_items and self._is_owner(ctx.author.id) and not filter_type:
+                try:
+                    from discord_interactions import ApprovalView
+                    import discord
+
+                    item = pending_items[0]
+                    status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
+                    priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                    type_emoji = {"bug": "🐛", "improvement": "💡", "idea": "💭", "tech_debt": "🔧"}
+
+                    embed = discord.Embed(
+                        title=f"{type_emoji.get(item.item_type, '')} Backlog: {item.id}",
+                        description=f"**{item.title}**\n\n{item.rationale or 'No rationale provided.'}",
+                        color=0xF39C12,
+                        timestamp=datetime.utcnow()
+                    )
+                    embed.add_field(name="Type", value=item.item_type, inline=True)
+                    embed.add_field(name="Priority", value=f"{priority_emoji.get(item.priority, '')} {item.priority}", inline=True)
+                    embed.add_field(name="Effort", value=item.effort, inline=True)
+                    embed.add_field(name="Pending", value=f"{len(pending_items)} total", inline=True)
+
+                    async def on_approve(interaction, item_id):
+                        approved = mgr.approve_item(item_id)
+                        if approved:
+                            await interaction.response.send_message(f"✅ Backlog item **{item_id}** approved for sprint!")
+                        else:
+                            await interaction.response.send_message(f"❌ Failed to approve {item_id}")
+
+                    async def on_reject(interaction, item_id, reason):
+                        rejected = mgr.reject_item(item_id, reason)
+                        if rejected:
+                            await interaction.response.send_message(f"❌ Backlog item **{item_id}** rejected: {reason}")
+                        else:
+                            await interaction.response.send_message(f"❌ Failed to reject {item_id}")
+
+                    view = ApprovalView(
+                        item_id=item.id,
+                        item_type="backlog",
+                        approve_callback=on_approve,
+                        reject_callback=on_reject,
+                        author_id=ctx.author.id
+                    )
+
+                    await ctx.reply(embed=embed, view=view)
+                    return
+                except ImportError:
+                    pass
+
+            lines.append(f"\nCommands: `!approve_backlog <id>` | `!reject_backlog <id> <reason>`")
+
+            await ctx.reply("\n".join(lines))
+
+        @self.bot.command(name="approve_backlog")
+        async def approve_backlog(ctx: commands.Context, item_id: str = None):
+            """
+            Approve a backlog item for future sprint.
+
+            Usage: !approve_backlog BL-0001
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can approve backlog items.")
+                return
+
+            if not item_id:
+                await ctx.reply("Usage: `!approve_backlog <item_id>`\nExample: `!approve_backlog BL-0001`")
+                return
+
+            from backlog_manager import get_backlog_manager
+            mgr = get_backlog_manager()
+
+            item = mgr.approve_item(item_id.upper())
+            if item:
+                await ctx.reply(f"✅ Approved **{item.id}**: {item.title}\n\nThis item is now a candidate for future sprints.")
+            else:
+                await ctx.reply(f"Could not approve {item_id}. Item may not exist or is not pending.")
+
+        @self.bot.command(name="reject_backlog")
+        async def reject_backlog(ctx: commands.Context, item_id: str = None, *, reason: str = None):
+            """
+            Reject a backlog item with reason.
+
+            Usage: !reject_backlog BL-0001 Out of scope for this project
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can reject backlog items.")
+                return
+
+            if not item_id or not reason:
+                await ctx.reply("Usage: `!reject_backlog <item_id> <reason>`\nExample: `!reject_backlog BL-0001 Out of scope`")
+                return
+
+            from backlog_manager import get_backlog_manager
+            mgr = get_backlog_manager()
+
+            item = mgr.reject_item(item_id.upper(), reason)
+            if item:
+                await ctx.reply(f"❌ Rejected **{item.id}**: {item.title}\nReason: {reason}")
+            else:
+                await ctx.reply(f"Could not reject {item_id}. Item may not exist or is not pending.")
+
+        @self.bot.command(name="backlog_stats")
+        async def backlog_stats(ctx: commands.Context):
+            """Show backlog statistics."""
+            from backlog_manager import get_backlog_manager
+            mgr = get_backlog_manager()
+
+            stats = mgr.get_statistics()
+
+            lines = [
+                "**Backlog Statistics**\n",
+                f"**Total Items:** {stats['total']}\n",
+                "**By Status:**"
+            ]
+            for status, count in stats['by_status'].items():
+                if count > 0:
+                    lines.append(f"  • {status}: {count}")
+
+            lines.append("\n**By Type:**")
+            for typ, count in stats['by_type'].items():
+                if count > 0:
+                    lines.append(f"  • {typ}: {count}")
+
+            lines.append("\n**By Priority:**")
+            for prio, count in stats['by_priority'].items():
+                if count > 0:
+                    lines.append(f"  • {prio}: {count}")
+
+            await ctx.reply("\n".join(lines))
+
+        @self.bot.command(name="sprint_plan")
+        async def sprint_plan(ctx: commands.Context):
+            """
+            Show sprint planning view with approved backlog items.
+
+            Displays items ready to be pulled into the next sprint,
+            organized by priority.
+            """
+            from backlog_manager import get_backlog_manager
+            mgr = get_backlog_manager()
+
+            candidates = mgr.get_sprint_candidates()
+
+            if not candidates:
+                await ctx.reply(
+                    "**Sprint Planning**\n\n"
+                    "No approved items available for sprint planning.\n\n"
+                    "Use `!team_backlog` to view pending items and `!approve_backlog <id>` to approve them."
+                )
+                return
+
+            lines = [
+                "**Sprint Planning - Available Items**\n",
+                "These approved items can be pulled into the next sprint:\n"
+            ]
+
+            # Group by priority
+            high = [i for i in candidates if i.priority == "high"]
+            medium = [i for i in candidates if i.priority == "medium"]
+            low = [i for i in candidates if i.priority == "low"]
+
+            if high:
+                lines.append("**🔴 High Priority:**")
+                for item in high:
+                    lines.append(f"  • {item.id}: {item.title} ({item.effort})")
+
+            if medium:
+                lines.append("\n**🟡 Medium Priority:**")
+                for item in medium:
+                    lines.append(f"  • {item.id}: {item.title} ({item.effort})")
+
+            if low:
+                lines.append("\n**🟢 Low Priority:**")
+                for item in low:
+                    lines.append(f"  • {item.id}: {item.title} ({item.effort})")
+
+            lines.append("\n*Start a mission with these items to begin the sprint.*")
+
+            await ctx.reply("\n".join(lines))
+
+        @self.bot.command(name="sprint_review")
+        async def sprint_review(ctx: commands.Context):
+            """
+            Generate a sprint review summary.
+
+            Shows completed work, learnings, and retrospective prompts.
+            """
+            from backlog_manager import get_backlog_manager, BacklogStatus
+            from mission_manager import get_mission_manager
+
+            mgr = get_backlog_manager()
+            mission_mgr = get_mission_manager()
+
+            # Get completed backlog items
+            completed = mgr.list_items(status=BacklogStatus.COMPLETED.value)
+
+            # Get recent mission info if available
+            current_mission = mission_mgr.get_current_mission() if mission_mgr else None
+
+            lines = ["**Sprint Review Summary**\n"]
+
+            if current_mission:
+                lines.append(f"**Mission:** {current_mission.get('id', 'Unknown')}")
+                lines.append(f"**Objective:** {current_mission.get('objective', 'N/A')}\n")
+
+            if completed:
+                lines.append("**Completed Backlog Items:**")
+                for item in completed[-10:]:  # Last 10 completed
+                    lines.append(f"  ✔️ {item.id}: {item.title}")
+            else:
+                lines.append("No backlog items completed in this sprint.\n")
+
+            lines.extend([
+                "\n**Retrospective Questions:**",
+                "1. What worked well? (keep doing)",
+                "2. What didn't work? (stop or change)",
+                "3. What should we try next? (experiments)\n",
+                "*Use `!retro add <type> <item>` to capture retrospective items.*"
+            ])
+
+            await ctx.reply("\n".join(lines))
+
     def _register_operational_commands(self):
         """Register P0/P1/P2 operational system commands."""
 
@@ -2168,6 +3164,479 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     f"cooldown={config.cooldown_minutes}m, auto_reset={config.auto_reset}"
                 )
             await ctx.reply("\n".join(output))
+
+        # =====================================================================
+        # GRACEFUL SUSPENSION (Token Limits / Wind Down)
+        # =====================================================================
+
+        @self.bot.command(name="suspend")
+        async def suspend(ctx: commands.Context, mode: str = "graceful"):
+            """
+            Gracefully suspend agent activities for later resumption.
+
+            Modes:
+              !suspend graceful  - Complete current tasks, document state, then stop (default)
+              !suspend immediate - Stop after current task, skip cleanup
+              !suspend status    - Check suspension status
+
+            Use when approaching token limits or need to pause work cleanly.
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can suspend agents.")
+                return
+
+            from suspension_manager import get_suspension_manager, SuspensionMode
+
+            manager = get_suspension_manager()
+
+            if mode == "status":
+                status = manager.get_status()
+                if status["suspended"]:
+                    await ctx.reply(
+                        f"**Suspension Active**\n"
+                        f"Mode: {status['mode']}\n"
+                        f"Started: {status['started_at']}\n"
+                        f"Pending tasks: {status['pending_tasks']}\n"
+                        f"Cleanup complete: {status['cleanup_done']}\n\n"
+                        f"Use `!unsuspend` to resume operations."
+                    )
+                else:
+                    await ctx.reply("Agents are **not suspended**. Operations running normally.")
+                return
+
+            # Determine suspension mode
+            if mode == "immediate":
+                suspend_mode = SuspensionMode.IMMEDIATE
+                mode_desc = "Immediate (skip cleanup)"
+            else:
+                suspend_mode = SuspensionMode.GRACEFUL
+                mode_desc = "Graceful (complete tasks + cleanup)"
+
+            await ctx.reply(
+                f"**Initiating Suspension**\n"
+                f"Mode: {mode_desc}\n\n"
+                f"This will:\n"
+                f"1. Stop accepting new tasks\n"
+                f"2. {'Complete current tasks' if mode != 'immediate' else 'Stop after current task'}\n"
+                f"3. {'Run cleanup (documentation, state save)' if mode != 'immediate' else 'Skip cleanup'}\n"
+                f"4. Save state for later resumption\n\n"
+                f"Use `!unsuspend` to resume operations later."
+            )
+
+            # Start suspension
+            result = await manager.initiate_suspension(
+                mode=suspend_mode,
+                reason=f"Manual suspension by {ctx.author}",
+                triggered_by=str(ctx.author)
+            )
+
+            # Post to team channel
+            await self.post_to_team_channel(
+                f"**SUSPENSION INITIATED** by {ctx.author.mention}\n"
+                f"Mode: {mode_desc}\n"
+                f"Agents will wind down gracefully.\n"
+                f"Use `!unsuspend` to resume operations."
+            )
+
+            # If graceful, trigger cleanup tasks
+            if suspend_mode == SuspensionMode.GRACEFUL:
+                await ctx.reply(
+                    "**Cleanup Phase Started**\n"
+                    "• Documenting current mission state...\n"
+                    "• Saving learnings to knowledge base...\n"
+                    "• Generating status report...\n\n"
+                    "Will notify when suspension complete."
+                )
+
+        @self.bot.command(name="unsuspend")
+        async def unsuspend(ctx: commands.Context):
+            """
+            Resume agent operations after suspension.
+
+            This restores the saved state and resumes work from where it stopped.
+            Alias: Use after !suspend to resume operations.
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can resume agents.")
+                return
+
+            from suspension_manager import get_suspension_manager
+
+            manager = get_suspension_manager()
+            status = manager.get_status()
+
+            if not status["suspended"]:
+                await ctx.reply("Agents are not suspended. Operations already running.")
+                return
+
+            result = await manager.resume_operations(resumed_by=str(ctx.author))
+
+            if result["success"]:
+                await ctx.reply(
+                    f"**Operations Resumed**\n"
+                    f"Suspended duration: {result['suspended_duration']}\n"
+                    f"Restored mission: {result.get('mission_id', 'None')}\n"
+                    f"Pending tasks: {result.get('pending_tasks', 0)}\n\n"
+                    f"Agents will continue from saved state."
+                )
+                await self.post_to_team_channel(
+                    f"**OPERATIONS RESUMED** by {ctx.author.mention}\n"
+                    f"Agents resuming work from saved state."
+                )
+            else:
+                await ctx.reply(f"Failed to resume: {result.get('error', 'Unknown error')}")
+
+        @self.bot.command(name="wind_down")
+        async def wind_down(ctx: commands.Context):
+            """
+            Alias for !suspend graceful - wind down operations cleanly.
+
+            Use this when approaching token limits to ensure:
+            - Current work is completed
+            - Documentation is updated
+            - No broken code is left behind
+            - State is saved for later resumption
+            """
+            # Just invoke suspend with graceful mode
+            await suspend(ctx, mode="graceful")
+
+        # =====================================================================
+        # SELF-IMPROVEMENT SYSTEM
+        # =====================================================================
+
+        @self.bot.command(name="improvements")
+        async def improvements(ctx: commands.Context, filter_status: str = None):
+            """
+            View self-improvement proposals.
+
+            Usage:
+              !improvements          - Show pending proposals for review
+              !improvements all      - Show all improvements
+              !improvements deployed - Show deployed improvements
+              !improvements stats    - Show improvement statistics
+            """
+            from improvement_manager import get_improvement_manager, ImprovementStatus
+
+            mgr = get_improvement_manager()
+
+            if filter_status == "stats":
+                stats = mgr.get_statistics()
+                await ctx.reply(
+                    f"**Self-Improvement Statistics**\n\n"
+                    f"Total: {stats['total']}\n"
+                    f"Deployed: {stats['deployed_count']}\n"
+                    f"Success Rate: {stats['success_rate']:.1f}%\n\n"
+                    f"**By Status:**\n" +
+                    "\n".join(f"  {k}: {v}" for k, v in stats['by_status'].items() if v > 0)
+                )
+                return
+
+            if filter_status == "all":
+                items = mgr.list_improvements()
+                title = "All Improvements"
+            elif filter_status == "deployed":
+                items = mgr.list_improvements(status=ImprovementStatus.DEPLOYED.value)
+                title = "Deployed Improvements"
+            else:
+                items = mgr.get_pending_review()
+                title = "Improvements Pending Review"
+
+            if not items:
+                await ctx.reply(f"**{title}**\n\nNo improvements found.")
+                return
+
+            lines = [f"**{title}** ({len(items)})\n"]
+            status_emoji = {
+                "draft": "📝", "proposed": "📋", "approved": "✅",
+                "deployed": "🚀", "rejected": "❌", "testing": "🧪"
+            }
+            type_emoji = {
+                "performance": "⚡", "reliability": "🛡️", "capability": "✨",
+                "code_quality": "🔧", "security": "🔒", "ux": "🎨"
+            }
+
+            # For pending items owned by operator, show interactive approval view
+            pending_review = [imp for imp in items if imp.status in ("proposed", "approved")]
+            if pending_review and self._is_owner(ctx.author.id) and not filter_status:
+                try:
+                    from discord_interactions import ApprovalView, ImprovementActionsView
+                    import discord
+
+                    # Show first pending improvement with buttons
+                    imp = pending_review[0]
+                    s_emoji = status_emoji.get(imp.status, "")
+                    t_emoji = type_emoji.get(imp.improvement_type, "")
+
+                    embed = discord.Embed(
+                        title=f"{s_emoji}{t_emoji} Improvement: {imp.id}",
+                        description=f"**{imp.title}**\n\n{imp.description[:500]}...",
+                        color=0x9B59B6,
+                        timestamp=datetime.utcnow()
+                    )
+                    embed.add_field(name="Type", value=imp.improvement_type, inline=True)
+                    embed.add_field(name="Risk", value=imp.risk_level, inline=True)
+                    embed.add_field(name="By", value=imp.proposed_by, inline=True)
+                    embed.add_field(name="Pending", value=f"{len(pending_review)} total", inline=True)
+
+                    # Use appropriate view based on status
+                    if imp.status == "approved":
+                        view = ImprovementActionsView(
+                            improvement_id=imp.id,
+                            improvement_manager=mgr,
+                            is_deployed=False,
+                            author_id=ctx.author.id
+                        )
+                    else:
+                        async def on_approve(interaction, item_id):
+                            mgr.approve(item_id)
+                            await interaction.response.send_message(f"✅ Improvement **{item_id}** approved!")
+
+                        async def on_reject(interaction, item_id, reason):
+                            mgr.reject(item_id, reason)
+                            await interaction.response.send_message(f"❌ Improvement **{item_id}** rejected: {reason}")
+
+                        view = ApprovalView(
+                            item_id=imp.id,
+                            item_type="improvement",
+                            approve_callback=on_approve,
+                            reject_callback=on_reject,
+                            author_id=ctx.author.id
+                        )
+
+                    await ctx.reply(embed=embed, view=view)
+                    return
+                except ImportError:
+                    pass  # Fall through to text display
+
+            # Text-based display (fallback or for filtered views)
+            for imp in items[:10]:
+                s_emoji = status_emoji.get(imp.status, "")
+                t_emoji = type_emoji.get(imp.improvement_type, "")
+                lines.append(f"{s_emoji} **{imp.id}** {t_emoji} {imp.title}")
+                lines.append(f"   └─ By: {imp.proposed_by} | Risk: {imp.risk_level}")
+
+            if len(items) > 10:
+                lines.append(f"\n... and {len(items) - 10} more")
+
+            lines.append(f"\nCommands: `!approve_improvement <id>` | `!reject_improvement <id> <reason>`")
+            await ctx.reply("\n".join(lines))
+
+        @self.bot.command(name="approve_improvement")
+        async def approve_improvement(ctx: commands.Context, improvement_id: str = None):
+            """
+            Approve a self-improvement proposal for deployment.
+
+            Usage: !approve_improvement IMP-0001
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can approve improvements.")
+                return
+
+            if not improvement_id:
+                await ctx.reply("Usage: `!approve_improvement <id>`")
+                return
+
+            from improvement_manager import get_improvement_manager
+            mgr = get_improvement_manager()
+
+            if mgr.approve(improvement_id.upper(), str(ctx.author)):
+                imp = mgr.get_improvement(improvement_id.upper())
+                await ctx.reply(
+                    f"✅ **Approved:** {imp.title}\n\n"
+                    f"Files affected: {', '.join(imp.affected_files)}\n"
+                    f"Risk level: {imp.risk_level}\n\n"
+                    f"Use `!deploy_improvement {imp.id}` to deploy."
+                )
+            else:
+                await ctx.reply(f"Could not approve {improvement_id}. Check status with `!improvements all`")
+
+        @self.bot.command(name="reject_improvement")
+        async def reject_improvement(ctx: commands.Context, improvement_id: str = None, *, reason: str = None):
+            """
+            Reject a self-improvement proposal.
+
+            Usage: !reject_improvement IMP-0001 Too risky for production
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can reject improvements.")
+                return
+
+            if not improvement_id or not reason:
+                await ctx.reply("Usage: `!reject_improvement <id> <reason>`")
+                return
+
+            from improvement_manager import get_improvement_manager
+            mgr = get_improvement_manager()
+
+            if mgr.reject(improvement_id.upper(), reason):
+                await ctx.reply(f"❌ **Rejected:** {improvement_id}\nReason: {reason}")
+            else:
+                await ctx.reply(f"Could not reject {improvement_id}")
+
+        @self.bot.command(name="deploy_improvement")
+        async def deploy_improvement(ctx: commands.Context, improvement_id: str = None):
+            """
+            Deploy an approved improvement to the codebase.
+
+            Usage: !deploy_improvement IMP-0001
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can deploy improvements.")
+                return
+
+            if not improvement_id:
+                await ctx.reply("Usage: `!deploy_improvement <id>`")
+                return
+
+            from improvement_manager import get_improvement_manager
+            mgr = get_improvement_manager()
+
+            imp = mgr.get_improvement(improvement_id.upper())
+            if not imp:
+                await ctx.reply(f"Improvement {improvement_id} not found.")
+                return
+
+            if imp.status != "approved":
+                await ctx.reply(f"Improvement must be approved before deployment. Status: {imp.status}")
+                return
+
+            await ctx.reply(f"🚀 **Deploying {improvement_id}...**\n\nThis may take a moment.")
+
+            result = await mgr.deploy(improvement_id.upper())
+
+            if result["success"]:
+                await ctx.reply(
+                    f"✅ **Deployed:** {imp.title}\n\n"
+                    f"Files changed: {result['files_changed']}\n"
+                    f"Rollback commit: `{result.get('rollback_commit', 'N/A')[:8]}`\n\n"
+                    f"Use `!rollback_improvement {improvement_id}` if issues arise."
+                )
+            else:
+                await ctx.reply(f"❌ **Deployment failed:** {result.get('error', 'Unknown error')}")
+
+        @self.bot.command(name="rollback_improvement")
+        async def rollback_improvement(ctx: commands.Context, improvement_id: str = None):
+            """
+            Rollback a deployed improvement.
+
+            Usage: !rollback_improvement IMP-0001
+            """
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can rollback improvements.")
+                return
+
+            if not improvement_id:
+                await ctx.reply("Usage: `!rollback_improvement <id>`")
+                return
+
+            from improvement_manager import get_improvement_manager
+            mgr = get_improvement_manager()
+
+            result = await mgr.rollback(improvement_id.upper())
+
+            if result["success"]:
+                await ctx.reply(
+                    f"⏪ **Rolled back:** {improvement_id}\n"
+                    f"Files restored: {result['files_restored']}"
+                )
+            else:
+                await ctx.reply(f"❌ **Rollback failed:** {result.get('error', 'Unknown error')}")
+
+        @self.bot.command(name="research")
+        async def research(ctx: commands.Context, *, topic: str = None):
+            """
+            Research a topic for best practices and cutting-edge techniques.
+
+            Usage:
+              !research async error handling python
+              !research ML model calibration techniques
+              !research Discord bot rate limiting
+            """
+            if not topic:
+                await ctx.reply(
+                    "**Research Commands:**\n"
+                    "`!research <topic>` - General research\n"
+                    "`!arxiv <topic>` - Search research papers\n"
+                    "`!github_search <topic>` - Search GitHub repos"
+                )
+                return
+
+            from research_tools import get_research_tools
+
+            await ctx.reply(f"🔍 Researching: **{topic}**\n\nThis may take a moment...")
+
+            tools = get_research_tools()
+            finding = await tools.research_topic(topic, depth="standard")
+
+            lines = [f"**Research: {topic}**\n"]
+            lines.append(f"📊 {finding.summary}\n")
+
+            if finding.key_insights:
+                lines.append("**Key Insights:**")
+                for insight in finding.key_insights:
+                    lines.append(f"  • {insight}")
+
+            if finding.results:
+                lines.append(f"\n**Top Results ({len(finding.results)}):**")
+                for r in finding.results[:5]:
+                    source_emoji = {"arxiv": "📄", "github": "💻", "duckduckgo": "🌐"}.get(r.source, "🔗")
+                    lines.append(f"{source_emoji} [{r.title[:60]}]({r.url})")
+
+            if finding.recommended_actions:
+                lines.append("\n**Recommendations:**")
+                for rec in finding.recommended_actions:
+                    lines.append(f"  → {rec}")
+
+            await ctx.reply("\n".join(lines))
+
+        @self.bot.command(name="arxiv")
+        async def arxiv_search(ctx: commands.Context, *, query: str = None):
+            """Search arXiv for research papers."""
+            if not query:
+                await ctx.reply("Usage: `!arxiv <search query>`")
+                return
+
+            from research_tools import get_research_tools
+
+            tools = get_research_tools()
+            results = await tools.search_arxiv(query, num_results=5)
+
+            if not results:
+                await ctx.reply(f"No papers found for: {query}")
+                return
+
+            lines = [f"**arXiv Papers: {query}**\n"]
+            for r in results:
+                lines.append(f"📄 [{r.title[:70]}]({r.url})")
+                if r.snippet:
+                    lines.append(f"   {r.snippet[:150]}...")
+
+            await ctx.reply("\n".join(lines))
+
+        @self.bot.command(name="github_search")
+        async def github_search(ctx: commands.Context, *, query: str = None):
+            """Search GitHub for repositories and code examples."""
+            if not query:
+                await ctx.reply("Usage: `!github_search <search query>`")
+                return
+
+            from research_tools import get_research_tools
+
+            tools = get_research_tools()
+            results = await tools.search_github(query, num_results=5)
+
+            if not results:
+                await ctx.reply(f"No repos found for: {query}")
+                return
+
+            lines = [f"**GitHub Repos: {query}**\n"]
+            for r in results:
+                stars = int(r.relevance_score) if r.relevance_score else 0
+                lines.append(f"💻 [{r.title}]({r.url}) ⭐ {stars}")
+                if r.snippet:
+                    lines.append(f"   {r.snippet[:100]}")
+
+            await ctx.reply("\n".join(lines))
 
         # =====================================================================
         # MONITORING & ALERTS (P0)
@@ -2570,6 +4039,280 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     f"  Actions: {session.actions_taken}"
                 )
             await ctx.reply("\n".join(output))
+
+    def _register_openproject_commands(self):
+        """Register commands for OpenProject integration."""
+
+        @self.bot.command(name="op_status")
+        async def openproject_status(ctx: commands.Context):
+            """Check OpenProject connection and project status."""
+            # Only Strategy Agent handles to avoid duplicates
+            if self.agent_type != "strategy":
+                return
+
+            from openproject_service import get_openproject_service
+
+            await ctx.reply("Checking OpenProject connection...")
+
+            service = get_openproject_service()
+            result = await service.test_connection()
+
+            if result["success"]:
+                embed = discord.Embed(
+                    title="OpenProject Status",
+                    color=0x2ECC71,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="URL", value=result["url"], inline=False)
+                embed.add_field(name="Instance", value=result.get("instance_name", "Unknown"), inline=True)
+                embed.add_field(name="Project", value=result.get("project_name", "Not found"), inline=True)
+                embed.add_field(
+                    name="Board URL",
+                    value=f"[Open Board]({result.get('project_url', result['url'])})",
+                    inline=False
+                )
+                embed.set_footer(text="OpenProject Integration")
+                await ctx.reply(embed=embed)
+            else:
+                await ctx.reply(f"❌ OpenProject connection failed: {result.get('error', 'Unknown error')}")
+
+        @self.bot.command(name="op_board")
+        async def openproject_board(ctx: commands.Context):
+            """Show OpenProject Kanban board summary."""
+            if self.agent_type != "strategy":
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            board = await service.get_board_summary()
+
+            embed = discord.Embed(
+                title="OpenProject Board",
+                description=f"[Open in Browser]({board['url']})",
+                color=0x3498DB,
+                timestamp=datetime.utcnow()
+            )
+
+            status_emoji = {
+                "New": "⏳",
+                "In progress": "🔄",
+                "Closed": "✅",
+                "On hold": "⏸️",
+                "Rejected": "❌"
+            }
+
+            for status, items in board["columns"].items():
+                if items:
+                    emoji = status_emoji.get(status, "📋")
+                    item_list = "\n".join([f"• {wp['subject'][:40]}..." for wp in items[:5]])
+                    if len(items) > 5:
+                        item_list += f"\n*+{len(items) - 5} more*"
+                    embed.add_field(
+                        name=f"{emoji} {status} ({len(items)})",
+                        value=item_list or "Empty",
+                        inline=False
+                    )
+
+            embed.set_footer(text=f"Total: {board['total']} work packages")
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="op_sync")
+        async def openproject_sync(ctx: commands.Context, target: str = None):
+            """
+            Sync RALPH data to OpenProject.
+
+            Usage:
+              !op_sync mission  - Sync current mission and tasks
+              !op_sync backlog  - Sync all backlog items
+              !op_sync all      - Sync everything
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not self._is_owner(ctx.author.id):
+                await ctx.reply("Only the operator can sync to OpenProject.")
+                return
+
+            if not target or target not in ("mission", "backlog", "all"):
+                await ctx.reply("Usage: `!op_sync mission|backlog|all`")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            results = {"synced": 0, "failed": 0, "errors": []}
+
+            # Sync mission
+            if target in ("mission", "all"):
+                manager = get_mission_manager()
+                if manager.current_mission:
+                    await ctx.reply(f"Syncing mission {manager.current_mission.mission_id}...")
+
+                    for task in manager.current_mission.tasks:
+                        try:
+                            wp = await service.sync_task_to_openproject(
+                                task_id=task.task_id,
+                                description=task.description,
+                                agent=task.assigned_to,
+                                mission_id=manager.current_mission.mission_id,
+                                status=task.status.value if hasattr(task.status, 'value') else task.status,
+                                priority=task.priority if hasattr(task, 'priority') else "medium"
+                            )
+                            if wp:
+                                results["synced"] += 1
+                            else:
+                                results["failed"] += 1
+                        except Exception as e:
+                            results["failed"] += 1
+                            results["errors"].append(str(e)[:50])
+                else:
+                    await ctx.reply("No active mission to sync.")
+
+            # Sync backlog
+            if target in ("backlog", "all"):
+                from backlog_manager import get_backlog_manager
+                backlog_mgr = get_backlog_manager()
+                items = backlog_mgr.list_items()
+
+                if items:
+                    await ctx.reply(f"Syncing {len(items)} backlog items...")
+
+                    for item in items:
+                        try:
+                            wp = await service.sync_backlog_item_to_openproject(
+                                item_id=item.id,
+                                title=item.title,
+                                item_type=item.item_type,
+                                rationale=item.rationale or "",
+                                priority=item.priority,
+                                effort=item.effort
+                            )
+                            if wp:
+                                results["synced"] += 1
+                            else:
+                                results["failed"] += 1
+                        except Exception as e:
+                            results["failed"] += 1
+                            results["errors"].append(str(e)[:50])
+
+            # Report results
+            embed = discord.Embed(
+                title="OpenProject Sync Complete",
+                color=0x2ECC71 if results["failed"] == 0 else 0xF39C12,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="✅ Synced", value=str(results["synced"]), inline=True)
+            embed.add_field(name="❌ Failed", value=str(results["failed"]), inline=True)
+
+            if results["errors"]:
+                embed.add_field(
+                    name="Errors",
+                    value="\n".join(results["errors"][:3]),
+                    inline=False
+                )
+
+            await ctx.reply(embed=embed)
+
+        @self.bot.command(name="op_create")
+        async def openproject_create(ctx: commands.Context, wp_type: str = None, *, title: str = None):
+            """
+            Create a work package in OpenProject.
+
+            Usage:
+              !op_create task Fix the login bug
+              !op_create story As a user I want to see my balance
+              !op_create bug API returns 500 on timeout
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not wp_type or not title:
+                await ctx.reply(
+                    "Usage: `!op_create <type> <title>`\n"
+                    "Types: task, story, bug, feature, epic"
+                )
+                return
+
+            type_map = {
+                "task": "Task",
+                "story": "User story",
+                "bug": "Bug",
+                "feature": "Feature",
+                "epic": "Epic"
+            }
+
+            op_type = type_map.get(wp_type.lower())
+            if not op_type:
+                await ctx.reply(f"Unknown type '{wp_type}'. Use: task, story, bug, feature, epic")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            wp = await service.create_work_package(
+                subject=title,
+                description=f"Created via Discord by {ctx.author.name}",
+                type_name=op_type,
+                status_name="New"
+            )
+
+            if wp:
+                board_url = f"{service.base_url}/work_packages/{wp.id}"
+                await ctx.reply(
+                    f"✅ Created {op_type}: **{title}**\n"
+                    f"ID: `{wp.id}`\n"
+                    f"[View in OpenProject]({board_url})"
+                )
+            else:
+                await ctx.reply("❌ Failed to create work package. Check API key and connection.")
+
+        @self.bot.command(name="op_update")
+        async def openproject_update(ctx: commands.Context, wp_id: str = None, status: str = None):
+            """
+            Update a work package status.
+
+            Usage: !op_update 123 closed
+            Statuses: new, in_progress, closed, on_hold, rejected
+            """
+            if self.agent_type != "strategy":
+                return
+
+            if not wp_id or not status:
+                await ctx.reply(
+                    "Usage: `!op_update <wp_id> <status>`\n"
+                    "Statuses: new, in_progress, closed, on_hold, rejected"
+                )
+                return
+
+            status_map = {
+                "new": "New",
+                "in_progress": "In progress",
+                "closed": "Closed",
+                "on_hold": "On hold",
+                "rejected": "Rejected"
+            }
+
+            op_status = status_map.get(status.lower())
+            if not op_status:
+                await ctx.reply(f"Unknown status '{status}'. Use: new, in_progress, closed, on_hold, rejected")
+                return
+
+            try:
+                wp_id_int = int(wp_id)
+            except ValueError:
+                await ctx.reply("Work package ID must be a number.")
+                return
+
+            from openproject_service import get_openproject_service
+
+            service = get_openproject_service()
+            wp = await service.update_work_package(wp_id=wp_id_int, status_name=op_status)
+
+            if wp:
+                await ctx.reply(f"✅ Updated work package #{wp_id} to **{op_status}**")
+            else:
+                await ctx.reply(f"❌ Failed to update work package #{wp_id}")
 
     def _register_interbot_commands(self):
         """Register commands for inter-bot communication."""
@@ -3033,8 +4776,8 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
             task_id=task_id
         )
 
-        # Update tracking
-        del self.running_tasks[task_id]
+        # Update tracking (use pop with default to avoid KeyError on race conditions)
+        self.running_tasks.pop(task_id, None)
         self.completed_tasks.append({
             "task_id": result.task_id,
             "status": result.status.value,
@@ -3137,17 +4880,18 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
 
                 # Update task status based on result
                 if result.status == TaskStatus.COMPLETED:
-                    await mission_manager.complete_task(next_task.task_id, result.output[:1000])
+                    await mission_manager.complete_task(next_task.task_id, result.output[:2000])
 
-                    # Post completion embed to team
-                    complete_embed = RALPHEmbeds.agent_complete(
+                    # Post completion embeds to team (chunked for long outputs)
+                    complete_embeds = RALPHEmbeds.agent_complete_chunked(
                         agent_type=self.agent_type,
-                        task_description=next_task.description[:200],
-                        result_summary=result.output[:1500] if result.output else "Completed",
+                        task_description=next_task.description[:500],
+                        result_summary=result.output if result.output else "Completed",
                         duration_seconds=result.duration_seconds,
                         task_id=next_task.task_id
                     )
-                    await self.post_embed_to_team(complete_embed)
+                    for embed in complete_embeds:
+                        await self.post_embed_to_team(embed)
 
                     # Check if mission is now complete
                     progress = mission.get_progress()
@@ -3158,7 +4902,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     await mission_manager.update_task_status(next_task.task_id, "failed")
                     error_embed = RALPHEmbeds.agent_error(
                         agent_type=self.agent_type,
-                        task_description=next_task.description[:200],
+                        task_description=next_task.description[:500],
                         error_message=result.error or "Unknown error",
                         task_id=next_task.task_id
                     )
