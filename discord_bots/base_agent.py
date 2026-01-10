@@ -4927,7 +4927,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
                     related_agents = ["tuning", "backtest", "risk", "strategy", "data"]
                     break
                 related_agents.extend(targets)
-            context = self._coordinator.get_context_for(self.agent_type, related_agents)
+            context = await self._coordinator.get_context_for(self.agent_type, related_agents)
 
         # =========================================================
         # TIERED ORCHESTRATION: Try cheap model first
@@ -5048,7 +5048,7 @@ agent for validation (usually Backtest for testing, Risk for safety audit).""",
 
         # Store output for other agents
         if self._coordinator and result.status == TaskStatus.COMPLETED:
-            self._coordinator.store_context(self.agent_type, result.output)
+            await self._coordinator.store_context(self.agent_type, result.output)
 
         if notify_channel:
             await self.post_to_primary_channel(
